@@ -697,9 +697,9 @@ class VisualHandler(QObject):
               or activity == 'spectating' or not has_valid_team):
             is_observing = True
         self.last_is_observing = is_observing
-        self.overlay._capture_scene_active = not is_observing and health > 0 and activity == 'playing'
 
         # 1. 闪光弹处理
+        self.overlay._capture_scene_active = not is_observing and health > 0 and activity == 'playing'
         if self.flash_enabled and not is_observing:
             flash_active = state.get('flashed', 0) > 0
             if flash_active != self.is_flashed:
