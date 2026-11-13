@@ -12,7 +12,7 @@ from qfluentwidgets import (
 )
 import os
 import time
-from .components import EventConfigWidget
+from .components import EventConfigWidget, RETIRED_REALTIME_EVENTS
 from .event_dialog import AddEventDialog
 from ..logic.sound_player import SoundPlayer
 from .styles import UIStyles
@@ -50,7 +50,6 @@ class IntegratedSoundPage(QWidget):
         # 初始化状态跟踪变量
         self.previous_kills = 0
         self.previous_deaths = 0
-        self.previous_bomb_state = ''
         self.previous_health = 100
         self.previous_is_alive = True
         self._runtime_events = []
@@ -349,11 +348,12 @@ class IntegratedSoundPage(QWidget):
             return
 
         self.event_list.clear()
-        events = self.config_manager.config.get('gsi_events', [])
+        saved_events = self.config_manager.config.get('gsi_events', [])
+        events = [event for event in saved_events if event.get('event') not in RETIRED_REALTIME_EVENTS]
         self._save_timer.stop()
 
         # 检查并修复配置
-        config_updated = False
+        config_updated = len(events) != len(saved_events)
 
         # 修复现有的武器击杀事件：将 event='kill' 改为 event='weapon_kill'
         # 但排除全局事件（武器名称为"全局事件"的情况）
@@ -534,8 +534,8 @@ class IntegratedSoundPage(QWidget):
         # 处理武器相关事件
         self._process_weapon_events(game_state, player)
 
-        # 处理C4和击杀事件
-        self._process_bomb_and_kill_events(game_state, player)
+        # 处理击杀与连杀统计
+        self._process_kill_events(game_state, player)
 
     def _process_weapon_events(self, game_state: dict, player: dict):
         # 检查武器事件
@@ -620,18 +620,13 @@ class IntegratedSoundPage(QWidget):
                 self.sound_player.play_sound(best_sound, best_volume, channel="weapon")
                 print(f"[GSI音效] 触发武器事件音效: {t_weapon} ({t_event}), 音量: {best_volume}%")
 
-    def _process_bomb_and_kill_events(self, game_state: dict, player: dict):
+    def _process_kill_events(self, game_state: dict, player: dict):
         """处理炸弹、击杀和死亡事件"""
         # 初始化之前的状态
         if not hasattr(self, 'previous_kills'):
             self.previous_kills = player.get('match_stats', {}).get('kills', 0)
         if not hasattr(self, 'previous_deaths'):
             self.previous_deaths = player.get('match_stats', {}).get('deaths', 0)
-        if not hasattr(self, 'previous_bomb_state'):
-            round_bomb_state = game_state.get('round', {}).get('bomb', '')
-            bomb_state = game_state.get('bomb', {}).get('state', '')
-            self.previous_bomb_state = round_bomb_state or bomb_state
-
         # 获取当前状态信息
         match_stats = player.get('match_stats', {})
         current_kills = match_stats.get('kills', 0)
@@ -678,7 +673,7 @@ class IntegratedSoundPage(QWidget):
         # 2. 活动状态为观战 或
         # 3. 活动状态不是游玩 或
         # 4. 没有有效队伍（可能是观战者）
-        # 注意：不要将死亡状态直接判断为观战，因为死亡时仍需要触发死亡音效
+        # 死亡时仍需更新连杀计数，不直接将死亡状态判断为观战。
         is_observing = (
             spectarget is not None or  # 正在观战某个玩家
             activity == 'spectating' or  # 活动状态为观战
@@ -812,28 +807,8 @@ class IntegratedSoundPage(QWidget):
 
         # 检查玩家死亡事件
         if current_deaths > self.previous_deaths:
-            print(f"[GSI音效] 确认死亡事件，开始查找死亡音效")
             print(f"[GSI音效] 玩家死亡，重置连杀数: {self.round_kills} -> 0")
             self.round_kills = 0
-
-            # 触发玩家死亡音效
-            death_sound_found = False
-            for config in self._runtime_events:
-
-                event_type = config.get('event')
-                sound_path = config.get('sound')
-
-                print(f"[GSI音效] 检查事件配置: event_type={event_type}, sound_path={sound_path}")
-
-                if event_type == 'player_death' and sound_path and os.path.exists(sound_path):
-                    volume = config.get('volume', 50)
-                    self.sound_player.play_sound(sound_path, volume, channel="death")
-                    print(f"[GSI音效] 触发玩家死亡音效, 音量: {volume}%")
-                    death_sound_found = True
-                    break
-
-            if not death_sound_found:
-                print(f"[GSI音效] 未找到可用的死亡音效配置")
 
         # 检查击杀事件（观战状态下跳过）
         if current_kills > self.previous_kills and not skip_non_death_events:
@@ -896,9 +871,6 @@ class IntegratedSoundPage(QWidget):
                 # 传入 None 而不是 '全局事件'，让底层只匹配 'kill' 类型
                 self._play_kill_sound('kill', None, self.round_kills)
 
-        # 处理C4事件
-        self._handle_bomb_events(game_state, skip_non_death_events)
-
         # 检查回合重置（新回合开始时重置连杀数）
         round_data = game_state.get('round', {})
         current_round_phase = round_data.get('phase', '')
@@ -910,9 +882,6 @@ class IntegratedSoundPage(QWidget):
         # 更新状态
         self.previous_kills = current_kills
         self.previous_deaths = current_deaths
-        round_bomb_state = game_state.get('round', {}).get('bomb', '')
-        bomb_state = game_state.get('bomb', {}).get('state', '')
-        self.previous_bomb_state = round_bomb_state or bomb_state
         self.previous_observing_state = is_observing
         self.previous_observer_slot = observer_slot
         self.previous_round_phase = current_round_phase
@@ -965,36 +934,3 @@ class IntegratedSoundPage(QWidget):
             print(f"[GSI音效] 未找到匹配的击杀音效: {event_type}, {weapon_name}, 连杀数: {kill_count}")
 
         return played
-
-    def _handle_bomb_events(self, game_state, skip_non_death_events):
-        """处理C4相关事件"""
-        # 检查C4事件（观战状态下跳过）
-        round_data = game_state.get('round', {})
-        bomb_data = game_state.get('bomb', {})
-        current_bomb_state = round_data.get('bomb', '') or bomb_data.get('state', '')
-
-        if current_bomb_state != self.previous_bomb_state and not skip_non_death_events:
-            if current_bomb_state == 'planted':
-                # 触发C4安装音效
-                for config in self._runtime_events:
-
-                    event_type = config.get('event')
-                    sound_path = config.get('sound')
-
-                    if event_type == 'bomb_planted' and sound_path and os.path.exists(sound_path):
-                        volume = config.get('volume', 50)
-                        self.sound_player.play_sound(sound_path, volume, channel="bomb")
-                        print(f"[GSI音效] 触发C4安装音效, 音量: {volume}%")
-                        break
-            elif current_bomb_state == 'defused':
-                # 只在明确收到 defused 状态时触发C4拆除，避免爆炸时误触发
-                for config in self._runtime_events:
-
-                    event_type = config.get('event')
-                    sound_path = config.get('sound')
-
-                    if event_type == 'bomb_defused' and sound_path and os.path.exists(sound_path):
-                        volume = config.get('volume', 50)
-                        self.sound_player.play_sound(sound_path, volume, channel="bomb")
-                        print(f"[GSI音效] 触发C4拆除音效, 音量: {volume}%")
-                        break
