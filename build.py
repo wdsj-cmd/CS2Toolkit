@@ -130,7 +130,6 @@ def build_exe():
             "--include-module=pycaw.pycaw",
             "--include-package=dxcam",
             "--include-package=numpy",
-            "--include-package=winrt",
             "--assume-yes-for-downloads",
             "--output-dir=dist",
             f"--output-filename={output_filename}",

@@ -87,11 +87,12 @@ class VisualConfigDialog(MessageBoxBase):
             capture_layout = QHBoxLayout()
             capture_layout.addWidget(BodyLabel("原画面捕获:"))
             self.capture_combo = ComboBox(self)
-            self.capture_combo.addItems(["低占用（8 帧/秒，可能显示系统捕获边框）", "兼容（12 帧/秒，占用较高）"])
+            self.capture_combo.addItems(["低占用（6 帧/秒）", "兼容（12 帧/秒，占用较高）"])
             self.capture_combo.setCurrentIndex(1 if self.visual_config.get('flash_capture_mode') == 'compat' else 0)
             self.capture_combo.currentIndexChanged.connect(self._on_capture_mode_changed)
             capture_layout.addWidget(self.capture_combo, 1)
             self.viewLayout.addLayout(capture_layout)
+            self.viewLayout.addWidget(BodyLabel("原画面异常时可切换兼容模式。"))
 
             reduce_layout = QHBoxLayout()
             reduce_layout.addWidget(BodyLabel("闪光弹降噪:"))
