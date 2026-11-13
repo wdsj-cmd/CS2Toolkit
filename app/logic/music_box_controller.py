@@ -285,7 +285,7 @@ class MusicBoxController(QObject):
         try:
             path = self.library.resolve(self.kit, clip)
             clip['fade_ms'] = 50 if cue.event.startswith('bomb_') else 180
-            clip['seamless'] = cue.event.startswith('bomb_ten_seconds') or cue.event == 'round_ten_seconds'
+            clip['seamless'] = cue.event.startswith('bomb_') or cue.event == 'round_ten_seconds'
             self._audio_request = (cue.event, time.monotonic(), cue.started)
             self.diagnostic.emit('music_cue', {'cue': cue.event, 'fallback': used_fallback,
                 'signal_source': self.engine.plant_signal_source,
