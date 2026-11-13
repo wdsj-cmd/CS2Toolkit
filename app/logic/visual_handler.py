@@ -48,6 +48,7 @@ class OverlayWindow(QWidget):
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.game_window = GameWindowTracker()
         self._game_focused = False
+        self._capture_scene_active = False
         self._last_game_geometry = None
         self._preview_active = False
         self.background_cache = PreFlashCache()
@@ -177,7 +178,7 @@ class OverlayWindow(QWidget):
         self._game_focused = focused
         hwnd = self.game_window.hwnd if focused else None
         geometry = self.game_window.client_geometry(hwnd) if hwnd else None
-        self.background_cache.set_context(hwnd, geometry, focused)
+        self.background_cache.set_context(hwnd, geometry, focused and self._capture_scene_active)
         self._sync_flash_visibility()
         self._sync_media_visibility()
 
@@ -627,6 +628,7 @@ class VisualHandler(QObject):
         self.overlay.set_flash_background_enabled(
             config.get('flash_freeze_background_enabled', True),
             self.visual_master_enabled and self.flash_enabled)
+        self.overlay.background_cache.set_capture_mode(config.get('flash_capture_mode', 'low'))
 
         self.death_media_enabled = config.get('death_media_enabled', False)
         self.death_media_path = config.get('death_media_path', '')
@@ -656,6 +658,7 @@ class VisualHandler(QObject):
         self.last_flash_value = game_state.get('player', {}).get('state', {}).get('flashed')
 
         if not self.visual_master_enabled:
+            self.overlay._capture_scene_active = False
             if self.is_flashed:
                 self.is_flashed = False
                 self.signals.update_flash.emit(0)
@@ -668,6 +671,7 @@ class VisualHandler(QObject):
 
         player = game_state.get('player', {})
         if not player:
+            self.overlay._capture_scene_active = False
             if self.is_flashed:
                 self.is_flashed = False
                 self.signals.update_flash.emit(0)
@@ -693,6 +697,7 @@ class VisualHandler(QObject):
               or activity == 'spectating' or not has_valid_team):
             is_observing = True
         self.last_is_observing = is_observing
+        self.overlay._capture_scene_active = not is_observing and health > 0 and activity == 'playing'
 
         # 1. 闪光弹处理
         if self.flash_enabled and not is_observing:

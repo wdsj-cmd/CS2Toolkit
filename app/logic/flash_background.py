@@ -5,6 +5,7 @@ from ctypes import wintypes
 import threading
 import time
 import math
+import os
 
 from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QImage, QImageReader, QPainter
@@ -58,11 +59,14 @@ def _is_whiteout(image):
 
 class DesktopFrameSource:
     """DXGI capture owned and used exclusively by the cache worker thread."""
-    def __init__(self):
+    def __init__(self, backend='winrt'):
         import dxcam
         from dxcam.core import Output
         from dxcam.util.io import enum_dxgi_adapters, enum_dxgi_outputs
         self.dxcam = dxcam
+        self.backend = backend
+        if backend == 'winrt':
+            os.environ.setdefault('DXCAM_WINRT_MIN_UPDATE_INTERVAL_MS', '125')
         self.cameras = {}
         self.outputs = []
         device_index = 0
@@ -90,6 +94,7 @@ class DesktopFrameSource:
             if key not in self.cameras:
                 self.cameras[key] = self.dxcam.create(
                     device_idx=device, output_idx=index, output_color='BGRA',
+                    backend=getattr(self, 'backend', 'dxgi'),
                     processor_backend='numpy', max_buffer_len=2)
             frame = self.cameras[key].grab(
                 region=(l - left, t - top, r - left, b - top),
@@ -119,7 +124,7 @@ class DesktopFrameSource:
 
 
 class PreFlashCache:
-    def __init__(self, source_factory=DesktopFrameSource, fps=12, memory_limit=64 * 1024 * 1024):
+    def __init__(self, source_factory=None, fps=8, memory_limit=64 * 1024 * 1024):
         self._source_factory = source_factory
         self._interval = 1 / fps
         self._memory_limit = memory_limit
@@ -137,6 +142,17 @@ class PreFlashCache:
         self._bytes = 0
         self._error = ''
         self._capture_after = 0.0
+        self._mode = 'low'
+
+    def set_capture_mode(self, mode):
+        mode = 'compat' if mode == 'compat' else 'low'
+        with self._lock:
+            if mode == self._mode:
+                return
+            self._mode = mode
+            self._interval = 1 / (12 if mode == 'compat' else 8)
+            self._clear_locked()
+        self._wake.set()
 
     def set_enabled(self, enabled):
         with self._lock:
@@ -209,6 +225,7 @@ class PreFlashCache:
     def status(self):
         with self._lock:
             return {'frames': len(self._frames), 'bytes': self._bytes,
+                    'mode': self._mode, 'fps': round(1 / self._interval),
                     'frozen': self._frozen is not None, 'error': self._error,
                     'enabled': self._enabled, 'frozen_age_ms': self._frozen_age_ms,
                     'ready': bool(self._frames and time.perf_counter() - self._frames[0][0] >= 0.15)}
@@ -233,6 +250,7 @@ class PreFlashCache:
             user32.GetForegroundWindow.argtypes = []
             user32.GetForegroundWindow.restype = wintypes.HWND
             inactive_since = None
+            source_mode = None
             while True:
                 with self._lock:
                     if self._closed:
@@ -241,6 +259,7 @@ class PreFlashCache:
                     active = self._enabled and context is not None and not self._suspended
                     generation = self._generation
                     capture_after = self._capture_after
+                    mode = self._mode
                 if not active:
                     if inactive_since is None:
                         inactive_since = time.perf_counter()
@@ -263,8 +282,13 @@ class PreFlashCache:
                     continue
                 started = time.perf_counter()
                 try:
+                    if source is not None and source_mode != mode:
+                        source.close()
+                        source = None
                     if source is None:
-                        source = self._source_factory()
+                        source = (self._source_factory() if self._source_factory else
+                                  DesktopFrameSource(backend='winrt' if mode == 'low' else 'dxgi'))
+                        source_mode = mode
                     image = source.grab(geometry)
                     if user32.GetForegroundWindow() == hwnd:
                         self._store(image, time.perf_counter(), generation)
