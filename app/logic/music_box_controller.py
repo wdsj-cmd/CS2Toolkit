@@ -7,10 +7,11 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from .music_box_events import MusicEventEngine, SLOT_MAP, object_node, number
 from .music_box_library import MusicKitLibrary, event_options, validate_clip
 from .music_box_player import MusicBoxPlayer
+from .music_bomb_visual import BombVisualMonitor
 
 DEFAULT_SETTINGS = {'enabled': False, 'volume': 50, 'selected_kit': '',
                     'estimate_timers': True, 'bomb_seconds': 40, 'round_seconds': 115, 'c4_warning_lead_ms': 500,
-                    'gsi_plant_delay_ms': 0}
+                    'gsi_plant_delay_ms': 0, 'c4_visual_enabled': False}
 
 
 class MusicBoxController(QObject):
@@ -18,6 +19,7 @@ class MusicBoxController(QObject):
     status_changed = Signal(str)
     error = Signal(str)
     diagnostic = Signal(str, dict)
+    visual_status_changed = Signal(str)
 
     def __init__(self, config_manager, parent=None, player=None):
         super().__init__(parent)
@@ -27,6 +29,7 @@ class MusicBoxController(QObject):
         saved = config_manager.get('music_box', {})
         if isinstance(saved, dict):
             self.settings.update({key: saved[key] for key in DEFAULT_SETTINGS if key in saved})
+        self.settings['c4_visual_enabled'] = self.settings['c4_visual_enabled'] is True
         for key, low, high in (('volume', 0, 100), ('bomb_seconds', 11, 180), ('round_seconds', 11, 3600),
                                ('c4_warning_lead_ms', 0, 2000), ('gsi_plant_delay_ms', 0, 3000)):
             try:
@@ -52,6 +55,9 @@ class MusicBoxController(QObject):
         self.status = '未启用，准备好音乐切片后即可配置'
         self._last_gsi = None
         self._closed = False
+        self.visual_monitor = BombVisualMonitor(config_manager.work_dir, self)
+        self.visual_monitor.detected.connect(self._on_visual_bomb)
+        self.visual_monitor.status_changed.connect(self.visual_status_changed)
         self.save_timer = QTimer(self)
         self.save_timer.setSingleShot(True)
         self.save_timer.timeout.connect(self._save)
@@ -61,6 +67,7 @@ class MusicBoxController(QObject):
         self.reload_library()
         if self.enabled:
             self._status('已启用，等待游戏数据')
+        self._sync_visual_monitor()
 
     @property
     def enabled(self):
@@ -109,7 +116,49 @@ class MusicBoxController(QObject):
             self._status('已启用，等待游戏事件' if self.kit else '请先创建或导入一个音乐盒')
             if self.engine.current_cue:
                 self._play_cue(self.engine.current_cue, resume=True)
+        self._sync_visual_monitor()
         self.changed.emit()
+
+    def _sync_visual_monitor(self):
+        if self.enabled and self.settings['c4_visual_enabled'] and not self._closed:
+            self.visual_monitor.start()
+        else:
+            self.visual_monitor.stop()
+
+    def set_visual_enabled(self, enabled):
+        self.settings['c4_visual_enabled'] = bool(enabled)
+        self._queue_save()
+        self._sync_visual_monitor()
+        self.changed.emit()
+
+    def reset_visual_template(self):
+        try:
+            if self.visual_monitor.reset_template():
+                self._sync_visual_monitor()
+        except OSError as exc:
+            self.error.emit(str(exc))
+
+    def _update_visual_context(self, state=None):
+        player = object_node((state or {}).get('player'))
+        flashed = number(object_node(player.get('state')).get('flashed'))
+        confirmed = self.engine.bomb_state in ('planted', 'defusing')
+        received = self._last_gsi if self._last_gsi is not None else time.monotonic() - 4
+        learned_after = self.engine.server_plant_received_at
+        self.visual_monitor.set_context(
+            (self.engine.map_name, self.engine.round_number), self.engine.phase, confirmed, received,
+            learn_after=learned_after + .5 if learned_after is not None else None,
+            blocked=bool(flashed and flashed > 0))
+
+    def _on_visual_bomb(self, observed_at):
+        if self._closed or not self.enabled or not self.settings['c4_visual_enabled']:
+            return
+        cue = self.engine.confirm_bomb_visual(observed_at)
+        if cue:
+            self.diagnostic.emit('music_bomb_visual', {'capture_to_ui_ms': round((time.monotonic() - observed_at) * 1000, 1)})
+            self._update_visual_context()
+            self._update_tick_rate()
+            if not self.previewing:
+                self._play_cue(cue)
 
     def set_volume(self, value):
         self.settings['volume'] = max(0, min(100, int(value)))
@@ -139,6 +188,7 @@ class MusicBoxController(QObject):
         first = self._last_gsi is None
         self._last_gsi = time.monotonic()
         cue = self.engine.process(state)
+        self._update_visual_context(state)
         if self.settings['gsi_plant_delay_ms'] != self.engine.gsi_plant_delay_ms:
             self.settings['gsi_plant_delay_ms'] = self.engine.gsi_plant_delay_ms
             self._queue_save()
@@ -233,6 +283,7 @@ class MusicBoxController(QObject):
             clip['fade_ms'] = 50 if cue.event.startswith('bomb_') else 180
             self._audio_request = (cue.event, time.monotonic(), cue.started)
             self.diagnostic.emit('music_cue', {'cue': cue.event, 'fallback': used_fallback,
+                'signal_source': self.engine.plant_signal_source,
                 'c4_warning_lead_ms': self.engine.warning_lead_ms,
                 'owner_source': self.engine.planter_source or 'unavailable'})
             if self.player.play(path, clip):
@@ -300,6 +351,7 @@ class MusicBoxController(QObject):
         if self._last_gsi is not None and time.monotonic() - self._last_gsi > 5:
             self.engine.reset()
             self._last_gsi = None
+            self._update_visual_context()
             if not self.previewing:
                 self.player.stop()
                 self._status('游戏数据已断开，等待重新连接')
@@ -313,6 +365,7 @@ class MusicBoxController(QObject):
         if self._closed:
             return
         self._closed = True
+        self.visual_monitor.stop()
         self.tick_timer.stop()
         if self.save_timer.isActive():
             self.save_timer.stop()

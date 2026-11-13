@@ -86,6 +86,7 @@ class MusicEventEngine:
         self._local_inventory = None
         self._local_c4_loss = None
         self.local_plant_time = None
+        self.visual_plant_time = None
         self.server_bomb_planted = False
         self.server_plant_received_at = None
         self._delay_sampled = False
@@ -104,6 +105,27 @@ class MusicEventEngine:
     def _emit(self, event, now):
         self.current_cue = MusicCue(event, now)
         return self.current_cue
+
+    def confirm_bomb_visual(self, observed_at):
+        observed_at = number(observed_at)
+        now = self.clock()
+        if (observed_at is None or self.phase != 'live' or self.round_paused
+                or self.last_update is None or now - self.last_update > 3
+                or self.bomb_state in ('planted', 'defusing', 'defused', 'exploded')
+                or not math.isfinite(observed_at) or not 0 <= now - observed_at <= .5):
+            return None
+        self.visual_plant_time = observed_at
+        self.bomb_state = 'planted'
+        self.plant_signal_source = 'hud'
+        self.bomb_timer_compensation_ms = 0
+        if self.planting_player:
+            self.planter_id, self.planter_source = self.planting_player, 'gsi'
+            self.planting_player = ''
+        if self.estimate_timers:
+            self.bomb_deadline = observed_at + self.bomb_seconds
+            self.bomb_estimated = True
+        self.ten_played.discard('bomb_ten_seconds')
+        return self._emit('bomb_planted', observed_at)
 
     def process(self, state):
         if not isinstance(state, dict) or not any(k in state for k in ('player', 'map', 'round', 'bomb')):
@@ -124,6 +146,7 @@ class MusicEventEngine:
             self.planter_source = ''
             self._local_inventory = self._local_c4_loss = None
             self.local_plant_time = None
+            self.visual_plant_time = None
             self.bomb_state = ''
             self.server_plant_received_at = None
             self._delay_sampled = False
@@ -179,6 +202,12 @@ class MusicEventEngine:
             # Retain confirmation through lagging or temporarily absent fields.
             bomb_state, planted = 'planted', True
             self.plant_signal_source = 'confirmed_previous'
+        if self.visual_plant_time is not None:
+            if terminal:
+                self.visual_plant_time = None
+            elif not planted:
+                bomb_state, planted = 'planted', True
+                self.plant_signal_source = 'hud'
         # The identity on a planting packet is the planter. The identity on a
         # defusing packet is the defuser, and must never replace the planter.
         if raw_bomb_state == 'planting' and self.bomb_state not in ('planted', 'defusing'):
@@ -196,6 +225,7 @@ class MusicEventEngine:
             self.planter_source = ''
         if bomb_state in ('defused', 'exploded'):
             self.local_plant_time = None
+            self.visual_plant_time = None
             self._local_c4_loss = None
         can_infer = phase not in ('over', 'freezetime') and bomb_state not in ('defused', 'exploded')
         self._track_local_plant(player, local, health, planted, now, can_infer)
@@ -225,6 +255,7 @@ class MusicEventEngine:
             self.planter_source = ''
             self._local_inventory = self._local_c4_loss = None
             self.local_plant_time = None
+            self.visual_plant_time = None
             self.server_plant_received_at = None
             self.ten_played.clear()
         else:
@@ -256,7 +287,8 @@ class MusicEventEngine:
                     self.bomb_deadline = anchor + self.bomb_seconds
                     self.bomb_estimated = True
             if self.bomb_estimated and self.local_plant_time is not None:
-                self.bomb_deadline = self.local_plant_time + self.bomb_seconds
+                anchor = self.local_plant_time if self.visual_plant_time is None else min(self.local_plant_time, self.visual_plant_time)
+                self.bomb_deadline = anchor + self.bomb_seconds
                 self.bomb_timer_compensation_ms = 0
             if (health == 0 and self.health is not None and self.health > 0
                     and phase == 'live' and not planted):
