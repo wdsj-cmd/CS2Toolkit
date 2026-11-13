@@ -4,12 +4,14 @@ import time
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from .music_box_events import MusicEventEngine, SLOT_MAP
+from .music_box_events import MusicEventEngine, SLOT_MAP, object_node, number
 from .music_box_library import MusicKitLibrary, event_options, validate_clip
 from .music_box_player import MusicBoxPlayer
+from .music_bomb_visual import BombVisualMonitor
 
 DEFAULT_SETTINGS = {'enabled': False, 'volume': 50, 'selected_kit': '',
-                    'estimate_timers': True, 'bomb_seconds': 40, 'round_seconds': 115, 'c4_warning_lead_ms': 500}
+                    'estimate_timers': True, 'bomb_seconds': 40, 'round_seconds': 115, 'c4_warning_lead_ms': 500,
+                    'gsi_plant_delay_ms': 0, 'c4_visual_enabled': False}
 
 
 class MusicBoxController(QObject):
@@ -17,6 +19,7 @@ class MusicBoxController(QObject):
     status_changed = Signal(str)
     error = Signal(str)
     diagnostic = Signal(str, dict)
+    visual_status_changed = Signal(str)
 
     def __init__(self, config_manager, parent=None, player=None):
         super().__init__(parent)
@@ -26,14 +29,17 @@ class MusicBoxController(QObject):
         saved = config_manager.get('music_box', {})
         if isinstance(saved, dict):
             self.settings.update({key: saved[key] for key in DEFAULT_SETTINGS if key in saved})
-        for key, low, high in (('volume', 0, 100), ('bomb_seconds', 11, 180), ('round_seconds', 11, 3600), ('c4_warning_lead_ms', 0, 2000)):
+        self.settings['c4_visual_enabled'] = self.settings['c4_visual_enabled'] is True
+        for key, low, high in (('volume', 0, 100), ('bomb_seconds', 11, 180), ('round_seconds', 11, 3600),
+                               ('c4_warning_lead_ms', 0, 2000), ('gsi_plant_delay_ms', 0, 3000)):
             try:
                 self.settings[key] = max(low, min(high, int(self.settings[key])))
             except (TypeError, ValueError, OverflowError):
                 self.settings[key] = DEFAULT_SETTINGS[key]
         self.engine = MusicEventEngine(estimate_timers=self.settings['estimate_timers'],
                                        bomb_seconds=self.settings['bomb_seconds'], round_seconds=self.settings['round_seconds'],
-                                       warning_lead_ms=self.settings['c4_warning_lead_ms'])
+                                       warning_lead_ms=self.settings['c4_warning_lead_ms'],
+                                       gsi_plant_delay_ms=self.settings['gsi_plant_delay_ms'])
         self.player = player or MusicBoxPlayer(self)
         self.player.set_volume(self.settings['volume'])
         self.player.failed.connect(self._failed)
@@ -43,11 +49,15 @@ class MusicBoxController(QObject):
         self._audio_request = None
         self._cue_choice = None
         self._bomb_signature = None
+        self._bomb_input_signature = None
         self.kit = None
         self.previewing = False
         self.status = '未启用，准备好音乐切片后即可配置'
         self._last_gsi = None
         self._closed = False
+        self.visual_monitor = BombVisualMonitor(config_manager.work_dir, self)
+        self.visual_monitor.detected.connect(self._on_visual_bomb)
+        self.visual_monitor.status_changed.connect(self.visual_status_changed)
         self.save_timer = QTimer(self)
         self.save_timer.setSingleShot(True)
         self.save_timer.timeout.connect(self._save)
@@ -57,6 +67,7 @@ class MusicBoxController(QObject):
         self.reload_library()
         if self.enabled:
             self._status('已启用，等待游戏数据')
+        self._sync_visual_monitor()
 
     @property
     def enabled(self):
@@ -105,7 +116,49 @@ class MusicBoxController(QObject):
             self._status('已启用，等待游戏事件' if self.kit else '请先创建或导入一个音乐盒')
             if self.engine.current_cue:
                 self._play_cue(self.engine.current_cue, resume=True)
+        self._sync_visual_monitor()
         self.changed.emit()
+
+    def _sync_visual_monitor(self):
+        if self.enabled and self.settings['c4_visual_enabled'] and not self._closed:
+            self.visual_monitor.start()
+        else:
+            self.visual_monitor.stop()
+
+    def set_visual_enabled(self, enabled):
+        self.settings['c4_visual_enabled'] = bool(enabled)
+        self._queue_save()
+        self._sync_visual_monitor()
+        self.changed.emit()
+
+    def reset_visual_template(self):
+        try:
+            if self.visual_monitor.reset_template():
+                self._sync_visual_monitor()
+        except OSError as exc:
+            self.error.emit(str(exc))
+
+    def _update_visual_context(self, state=None):
+        player = object_node((state or {}).get('player'))
+        flashed = number(object_node(player.get('state')).get('flashed'))
+        confirmed = self.engine.bomb_state in ('planted', 'defusing')
+        received = self._last_gsi if self._last_gsi is not None else time.monotonic() - 4
+        learned_after = self.engine.server_plant_received_at
+        self.visual_monitor.set_context(
+            (self.engine.map_name, self.engine.round_number), self.engine.phase, confirmed, received,
+            learn_after=learned_after + .5 if learned_after is not None else None,
+            blocked=bool(flashed and flashed > 0))
+
+    def _on_visual_bomb(self, observed_at):
+        if self._closed or not self.enabled or not self.settings['c4_visual_enabled']:
+            return
+        cue = self.engine.confirm_bomb_visual(observed_at)
+        if cue:
+            self.diagnostic.emit('music_bomb_visual', {'capture_to_ui_ms': round((time.monotonic() - observed_at) * 1000, 1)})
+            self._update_visual_context()
+            self._update_tick_rate()
+            if not self.previewing:
+                self._play_cue(cue)
 
     def set_volume(self, value):
         self.settings['volume'] = max(0, min(100, int(value)))
@@ -135,13 +188,30 @@ class MusicBoxController(QObject):
         first = self._last_gsi is None
         self._last_gsi = time.monotonic()
         cue = self.engine.process(state)
+        self._update_visual_context(state)
+        if self.settings['gsi_plant_delay_ms'] != self.engine.gsi_plant_delay_ms:
+            self.settings['gsi_plant_delay_ms'] = self.engine.gsi_plant_delay_ms
+            self._queue_save()
+        round_info, bomb, countdown = (object_node(state.get(key)) for key in ('round', 'bomb', 'phase_countdowns'))
+        inputs = tuple(value if isinstance(value, str) else None for value in (
+            round_info.get('phase'), round_info.get('bomb'), bomb.get('state'), countdown.get('phase')))
+        if inputs != self._bomb_input_signature:
+            self._bomb_input_signature = inputs
+            self.diagnostic.emit('music_bomb_inputs', {
+                'round_phase': inputs[0], 'round_bomb': inputs[1], 'bomb_state': inputs[2], 'countdown_phase': inputs[3],
+                'phase_seconds': number(countdown.get('phase_ends_in')), 'bomb_seconds': number(bomb.get('countdown'))})
         received = state.get('_toolkit_received_at', self._last_gsi)
         queue_ms = max(0, (self._last_gsi - received) * 1000) if isinstance(received, (int, float)) else None
         relation = ('self' if self.engine.planter_id == self.engine.local_id else 'other') if self.engine.planter_id else 'unknown'
-        signature = (self.engine.bomb_state, relation, self.engine.planter_source, self.engine.server_bomb_planted)
+        signature = (self.engine.bomb_state, relation, self.engine.planter_source, self.engine.server_bomb_planted,
+                     self.engine.plant_signal_source, self.engine.bomb_estimated)
         if signature != self._bomb_signature and self.engine.bomb_state:
             self.diagnostic.emit('music_bomb_state', {'state': self.engine.bomb_state, 'owner': relation,
                 'server_plant_seen': self.engine.server_bomb_planted,
+                'signal_source': self.engine.plant_signal_source,
+                'timer_estimated': self.engine.bomb_estimated,
+                'timer_compensation_ms': self.engine.bomb_timer_compensation_ms,
+                'gsi_plant_delay_ms': self.engine.gsi_plant_delay_ms,
                 'owner_source': self.engine.planter_source or 'unavailable', 'ui_queue_ms': queue_ms,
                 'local_anchor_age_ms': round((time.monotonic() - self.engine.local_plant_time) * 1000, 1) if self.engine.local_plant_time is not None else None,
                 'evidence': dict(self.engine.plant_evidence)})
@@ -211,8 +281,10 @@ class MusicBoxController(QObject):
         try:
             path = self.library.resolve(self.kit, clip)
             clip['fade_ms'] = 50 if cue.event.startswith('bomb_') else 180
+            clip['seamless'] = cue.event.startswith('bomb_ten_seconds') or cue.event == 'round_ten_seconds'
             self._audio_request = (cue.event, time.monotonic(), cue.started)
             self.diagnostic.emit('music_cue', {'cue': cue.event, 'fallback': used_fallback,
+                'signal_source': self.engine.plant_signal_source,
                 'c4_warning_lead_ms': self.engine.warning_lead_ms,
                 'owner_source': self.engine.planter_source or 'unavailable'})
             if self.player.play(path, clip):
@@ -280,6 +352,7 @@ class MusicBoxController(QObject):
         if self._last_gsi is not None and time.monotonic() - self._last_gsi > 5:
             self.engine.reset()
             self._last_gsi = None
+            self._update_visual_context()
             if not self.previewing:
                 self.player.stop()
                 self._status('游戏数据已断开，等待重新连接')
@@ -293,6 +366,7 @@ class MusicBoxController(QObject):
         if self._closed:
             return
         self._closed = True
+        self.visual_monitor.stop()
         self.tick_timer.stop()
         if self.save_timer.isActive():
             self.save_timer.stop()
