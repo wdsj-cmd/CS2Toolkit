@@ -9,6 +9,7 @@ from .music_box_events import MusicEventEngine, MusicCue, SLOT_MAP, object_node,
 from .music_box_library import MusicKitLibrary, event_options, validate_clip
 from .music_box_player import MusicBoxPlayer
 from .music_bomb_visual import BombVisualMonitor
+from .music_round_clock import RoundClockMonitor
 
 DEFAULT_SETTINGS = {'enabled': False, 'volume': 50, 'selected_kit': '',
                     'estimate_timers': True, 'bomb_seconds': 40, 'c4_warning_lead_ms': 500,
@@ -57,6 +58,8 @@ class MusicBoxController(QObject):
         self.status = '未启用，准备好音乐切片后即可配置'
         self._last_gsi = None
         self.round_seconds_remaining = None
+        self.round_time_source = ''
+        self._clock_map_live = self._clock_blocked = self._clock_menu = False
         self._closed = False
         self._team_menu_open = False
         self._team_cue = self._team_return_choice = None
@@ -65,6 +68,10 @@ class MusicBoxController(QObject):
         self.visual_monitor.status_changed.connect(self._visual_status)
         self.visual_monitor.team_menu_changed.connect(self._on_team_menu)
         self.visual_monitor.diagnostic.connect(self.diagnostic)
+        self.clock_monitor = RoundClockMonitor(self)
+        self.clock_monitor.sampled.connect(self._on_round_clock)
+        self.clock_monitor.resync_requested.connect(self._on_clock_resync)
+        self.clock_monitor.status_changed.connect(lambda text: self.diagnostic.emit('music_round_clock_status', {'status': text}))
         self.save_timer = QTimer(self)
         self.save_timer.setSingleShot(True)
         self.save_timer.timeout.connect(self._save)
@@ -130,8 +137,44 @@ class MusicBoxController(QObject):
     def _sync_visual_monitor(self):
         if self.enabled and not self._closed:
             self.visual_monitor.start()
+            self.clock_monitor.start()
         else:
             self.visual_monitor.stop()
+            self.clock_monitor.stop()
+        self._update_clock_context()
+
+    def _update_clock_context(self):
+        eligible = (self.enabled and not self._closed and self._clock_map_live and not self._clock_blocked
+                  and not self._clock_menu and not self._team_menu_open and self.engine.phase == 'live'
+                  and not self.engine.round_paused and self.engine.bomb_state not in ('planted', 'defusing'))
+        self.clock_monitor.set_context((self.engine.map_name, self.engine.round_number),
+            eligible and self.engine.round_deadline is None,
+            self._last_gsi if self._last_gsi is not None else time.monotonic() - 4,
+            watch=eligible and self.engine.round_clock_source == 'hud')
+
+    def _on_clock_resync(self, key):
+        if (not self._closed and self.enabled and key == (self.engine.map_name, self.engine.round_number)
+                and self.engine.round_clock_source == 'hud'):
+            self.engine.round_deadline = None
+            self.engine.round_clock_source = ''
+            self.diagnostic.emit('music_round_clock_resync', {'reason': 'foreground_return'})
+            self._update_clock_context()
+            self._update_round_time()
+
+    def _on_round_clock(self, key, seconds, observed_at):
+        if (key != (self.engine.map_name, self.engine.round_number) or not self.enabled or self._closed
+                or self._team_menu_open or self._clock_menu or self._clock_blocked):
+            return
+        before = self.engine.round_deadline
+        cue = self.engine.confirm_round_clock(seconds, observed_at)
+        if before is None and self.engine.round_deadline is not None:
+            self.diagnostic.emit('music_round_clock_synced', {'seconds': seconds, 'source': 'hud',
+                'capture_to_ui_ms': round((time.monotonic() - observed_at) * 1000, 1)})
+        self._update_clock_context()  # The accepted anchor stops further OCR for this round.
+        self._update_round_time()
+        self._update_tick_rate()
+        if cue and not self.previewing and not self._team_menu_open:
+            self._play_cue(cue)
 
     def _visual_status(self, text):
         self.visual_status_changed.emit(text)
@@ -161,6 +204,10 @@ class MusicBoxController(QObject):
             self._cue_choice = self._team_return_choice
             self._team_cue = self._team_return_choice = None
         self.diagnostic.emit('music_team_menu', {'visible': visible})
+        if visible and self.engine.round_clock_source == 'hud':
+            self.engine.round_deadline = None
+            self.engine.round_clock_source = ''
+        self._update_clock_context()
         if self.enabled and not self.previewing and not already_playing:
             if not visible and self.engine.current_cue and self.engine.current_cue.event == 'team_select':
                 self.player.stop()
@@ -194,6 +241,7 @@ class MusicBoxController(QObject):
         if cue:
             self.diagnostic.emit('music_bomb_visual', {'capture_to_ui_ms': round((time.monotonic() - observed_at) * 1000, 1)})
             self._update_visual_context()
+            self._update_clock_context()
             self._update_tick_rate()
             if not self.previewing and not self._team_menu_open:
                 self._play_cue(cue)
@@ -224,6 +272,16 @@ class MusicBoxController(QObject):
         first = self._last_gsi is None
         self._last_gsi = time.monotonic()
         cue = self.engine.process(state)
+        map_info = object_node(state.get('map'))
+        player = object_node(state.get('player'))
+        if 'phase' in map_info:
+            self._clock_map_live = map_info['phase'] == 'live'
+        self._clock_menu = player.get('activity') == 'menu'
+        self._clock_blocked = bool(number(object_node(player.get('state')).get('flashed')))
+        if self._clock_menu and self.engine.round_clock_source == 'hud':
+            self.engine.round_deadline = None
+            self.engine.round_clock_source = ''
+        self._update_clock_context()
         self._update_round_time()
         self._update_visual_context(state)
         player = object_node(state.get('player'))
@@ -274,8 +332,10 @@ class MusicBoxController(QObject):
         remaining = (max(0, math.ceil(deadline - now))
                      if deadline is not None and self.engine.phase == 'live' and not self.engine.round_paused
                      and self._last_gsi is not None and now - self._last_gsi <= 3 else None)
-        if remaining != self.round_seconds_remaining:
+        source = self.engine.round_clock_source if remaining is not None else ''
+        if (remaining, source) != (self.round_seconds_remaining, self.round_time_source):
             self.round_seconds_remaining = remaining
+            self.round_time_source = source
             self.round_time_changed.emit(remaining)
 
     def _update_tick_rate(self):
@@ -412,6 +472,7 @@ class MusicBoxController(QObject):
             self.engine.reset()
             self._last_gsi = None
             self._update_visual_context()
+            self._update_clock_context()
             if not self.previewing:
                 self.player.stop()
                 self._status('游戏数据已断开，等待重新连接')
@@ -426,6 +487,7 @@ class MusicBoxController(QObject):
             return
         self._closed = True
         self.visual_monitor.stop()
+        self.clock_monitor.stop()
         self.tick_timer.stop()
         if self.save_timer.isActive():
             self.save_timer.stop()

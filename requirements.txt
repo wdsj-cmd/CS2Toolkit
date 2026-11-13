@@ -5,3 +5,9 @@ pycaw>=20230407
 zstandard
 dxcam>=0.3,<0.4
 numpy>=1.26,<3
+winrt-Windows.Media.Ocr>=3.2.1,<4
+winrt-Windows.Graphics.Imaging>=3.2.1,<4
+winrt-Windows.Globalization>=3.2.1,<4
+winrt-Windows.Foundation>=3.2.1,<4
+winrt-Windows.Foundation.Collections>=3.2.1,<4
+winrt-Windows.Storage.Streams>=3.2.1,<4

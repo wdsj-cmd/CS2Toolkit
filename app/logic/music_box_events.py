@@ -101,6 +101,7 @@ class MusicEventEngine:
         self.paused_at = None
         self.round_estimated = self.bomb_estimated = False
         self.round_deadline = self.bomb_deadline = None
+        self.round_clock_source = ''
         self.ten_played = set()
         self.current_cue = None
         self.last_update = None
@@ -119,6 +120,8 @@ class MusicEventEngine:
             return None
         self.visual_plant_time = observed_at
         self.bomb_state = 'planted'
+        self.round_deadline = None
+        self.round_clock_source = ''
         self.plant_signal_source = 'hud'
         self.bomb_timer_compensation_ms = 0
         if self.planting_player:
@@ -144,6 +147,7 @@ class MusicEventEngine:
         if round_number is not None and round_number != self.round_number:
             self.ten_played.clear()
             self.round_deadline = self.bomb_deadline = None
+            self.round_clock_source = ''
             self.round_number = round_number
             self.planting_player = self.planter_id = ''
             self.planter_source = ''
@@ -276,6 +280,7 @@ class MusicEventEngine:
             self.selecting_team = self.team_selection_done = False
             self.health = self.mvps = None
             self.round_deadline = self.bomb_deadline = None
+            self.round_clock_source = ''
             self.bomb_state = ''
             self.planting_player = self.planter_id = ''
             self.planter_source = ''
@@ -290,6 +295,7 @@ class MusicEventEngine:
             self.phase = ''
             self.health = self.mvps = None
             self.round_deadline = self.bomb_deadline = None
+            self.round_clock_source = ''
             self.bomb_state = ''
             self.ten_played.clear()
         else:
@@ -299,6 +305,7 @@ class MusicEventEngine:
                 candidates.append('freeze_time')
                 self.ten_played.clear()
                 self.round_deadline = self.bomb_deadline = None
+                self.round_clock_source = ''
                 self.planting_player = self.planter_id = ''
                 self.planter_source = ''
                 self._local_c4_loss = None
@@ -307,6 +314,8 @@ class MusicEventEngine:
             elif phase == 'live' and self.phase == 'freezetime':
                 candidates.append('round_start')
             if planted and self.bomb_state not in ('planted', 'defusing'):
+                self.round_deadline = None
+                self.round_clock_source = ''
                 candidates.append('bomb_planted')
                 self.ten_played.discard('bomb_ten_seconds')
                 # Estimate only a newly observed plant, never a mid-round join.
@@ -345,12 +354,14 @@ class MusicEventEngine:
             if self.round_paused and self.paused_at is None:
                 self.paused_at = now
                 self.round_deadline = None
+                self.round_clock_source = ''
             elif not self.round_paused and self.paused_at is not None:
                 self.paused_at = None
             remaining = number(countdown.get('phase_ends_in'))
             if remaining is not None and remaining >= 0:
                 if countdown.get('phase') == 'live' and not planted:
                     self.round_deadline = now + remaining
+                    self.round_clock_source = 'gsi'
                     self.round_estimated = False
                 elif countdown.get('phase') == 'bomb' and planted:
                     self.bomb_deadline = now + remaining
@@ -363,6 +374,7 @@ class MusicEventEngine:
                 self.bomb_timer_compensation_ms = 0
             if phase in ('freezetime', 'over') or bomb_state in ('defused', 'exploded'):
                 self.round_deadline = self.bomb_deadline = None
+                self.round_clock_source = ''
             if self.phase == 'live' and not self.round_paused:
                 warning = self._warning(now)
                 if warning:
@@ -375,6 +387,19 @@ class MusicEventEngine:
         if bomb_state in ('defused', 'exploded') and self.current_cue and self.current_cue.event.startswith('bomb_'):
             return self._emit('stop', now)
         return None
+
+    def confirm_round_clock(self, seconds, observed_at):
+        now = self.clock()
+        seconds, observed_at = number(seconds), number(observed_at)
+        if (seconds is None or observed_at is None or not 0 < seconds < 3600
+                or not 0 <= now - observed_at <= 2 or self.phase != 'live' or self.round_paused
+                or self.last_update is None or now - self.last_update > 3
+                or self.round_deadline is not None or self.bomb_state in ('planted', 'defusing')):
+            return None
+        self.round_deadline = observed_at + seconds
+        self.round_clock_source = 'hud'
+        event = self._warning(now)
+        return self._emit(event, now) if event else None
 
     def _track_local_plant(self, player, local, health, planted, now, can_infer=True):
         self.plant_evidence = {'local': bool(local), 'alive': health is not None and health > 0}

@@ -264,7 +264,7 @@ class MusicBoxPage(ScrollArea):
         self.warning_lead.setSuffix(' 毫秒')
         row.addWidget(self.warning_lead)
         timing_layout.addLayout(row)
-        hint = CaptionLabel('回合十秒音乐仅跟随游戏实际剩余时间。C4 估算时长从下次安包生效；提示偏晚可调大补偿，偏早则调小。', timing)
+        hint = CaptionLabel('回合开始时同步一次实际时间，随后本地倒计时；游戏数据缺失时读取顶部计时器，同步后停止识别。安包后使用 C4 计时。', timing)
         hint.setWordWrap(True)
         timing_layout.addWidget(hint)
         self.layout.addWidget(timing)
@@ -309,7 +309,7 @@ class MusicBoxPage(ScrollArea):
             self.layout.addWidget(card)
 
         note = CaptionLabel('首次使用请在设置中重新生成 GSI 配置并重启 CS2。若与游戏原音乐重叠，可在游戏中调低对应音乐音量。\n'
-                            '游戏未提供回合时间时不猜算；安包者信息缺失时使用通用切片。', self)
+                            '计时器被遮挡或切出游戏时暂停读取；安包者信息缺失时使用通用切片。', self)
         note.setWordWrap(True)
         self.layout.addWidget(note)
         reference = BodyLabel('<a href="https://github.com/TYFALY/CS-Jukebox-V2">音乐事件设计参考 CS-Jukebox-V2</a>', self)
@@ -383,7 +383,8 @@ class MusicBoxPage(ScrollArea):
         self.controller.set_timing(self.estimate.isChecked(), self.bomb_seconds.value())
 
     def _show_round_time(self, seconds):
-        self.round_remaining.setText('游戏未提供' if seconds is None else f'{seconds // 60:02d}:{seconds % 60:02d}')
+        source = '画面同步' if self.controller.round_time_source == 'hud' else '游戏数据'
+        self.round_remaining.setText('等待实际计时' if seconds is None else f'{seconds // 60:02d}:{seconds % 60:02d}（{source}）')
 
     def _select(self, index):
         if index >= 0:
