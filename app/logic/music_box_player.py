@@ -1,8 +1,26 @@
 """One interruptible music channel with clip offsets, loops and short fades."""
 from pathlib import Path
 
+import numpy as np
+
 from PySide6.QtCore import QObject, QUrl, QTimer, Signal, QPropertyAnimation
-from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+from PySide6.QtMultimedia import QAudioFormat, QAudioOutput, QMediaPlayer
+try:
+    from PySide6.QtMultimedia import QAudioBufferOutput
+except ImportError:  # Qt before 6.8 still uses the position-based fallback.
+    QAudioBufferOutput = None
+
+
+def buffer_has_audio(buffer):
+    formats = {QAudioFormat.UInt8: (np.uint8, 128), QAudioFormat.Int16: (np.int16, 32768),
+               QAudioFormat.Int32: (np.int32, 2147483648), QAudioFormat.Float: (np.float32, 1)}
+    spec = formats.get(buffer.format().sampleFormat())
+    if not buffer.isValid() or spec is None:
+        return False
+    samples = np.frombuffer(buffer.constData(), dtype=spec[0], count=buffer.sampleCount()).astype(np.float32)
+    if spec[0] == np.uint8:
+        samples -= 128
+    return bool(samples.size and np.max(np.abs(samples)) > spec[1] * .0005)
 
 
 class MusicBoxPlayer(QObject):
@@ -22,11 +40,19 @@ class MusicBoxPlayer(QObject):
         self._loaded = False
         self._ended = False
         self._source = QUrl()
+        self._handoff_pending = False
+        self._handoff_queued = False
+        self._pending_previous = -1
+        self.buffer_outputs = [QAudioBufferOutput(self) if QAudioBufferOutput else None for _ in self.players]
         for index, player in enumerate(self.players):
             player.setAudioOutput(self.outputs[index])
             player.mediaStatusChanged.connect(lambda status, i=index: self._media_status(i, status))
             player.positionChanged.connect(lambda position, i=index: self._position(i, position))
             player.errorOccurred.connect(lambda error, message, i=index: self._error(i, message))
+            if self.buffer_outputs[index] is not None:
+                # Keep the output wiring stable across rapid source changes.
+                player.setAudioBufferOutput(self.buffer_outputs[index])
+                self.buffer_outputs[index].audioBufferReceived.connect(lambda buffer, i=index: self._buffer_ready(i, buffer))
 
     def set_volume(self, value):
         self.master_volume = max(0, min(100, int(value)))
@@ -56,19 +82,48 @@ class MusicBoxPlayer(QObject):
         self.clip = dict(clip)
         self._source = QUrl.fromLocalFile(str(Path(path).resolve()))
         self._loaded = self._ended = False
+        self._handoff_pending = bool(clip.get('seamless'))
+        self._handoff_queued = False
+        self._pending_previous = previous
         self.outputs[current].setVolume(0)
-        if previous >= 0:
-            fade = self.fades[previous]
-            fade.stop()
-            fade.setDuration(int(clip.get('fade_ms', 180)))
-            fade.setStartValue(self.outputs[previous].volume())
-            fade.setEndValue(0)
-            fade.start()
-            QTimer.singleShot(int(clip.get('fade_ms', 180)) + 20,
-                              lambda: self.players[previous].stop() if token == self._token else None)
+        if not self._handoff_pending:
+            self._fade_out(previous, token, int(clip.get('fade_ms', 180)))
         self.players[current].setSource(self._source)
         self.players[current].play()
         return True
+
+    def _fade_out(self, index, token, duration):
+        if index < 0:
+            return
+        fade = self.fades[index]
+        fade.stop()
+        fade.setDuration(duration)
+        fade.setStartValue(self.outputs[index].volume())
+        fade.setEndValue(0)
+        fade.start()
+        QTimer.singleShot(duration + 20, lambda: self.players[index].stop() if token == self._token else None)
+
+    def _begin_handoff(self):
+        if not self._handoff_pending or self.active < 0:
+            return
+        self._handoff_pending = False
+        # Decoded buffers can still be queued at the device. This short overlap
+        # covers that output delay without cutting off the outgoing clip first.
+        self._fade_out(self._pending_previous, self._token, 150)
+        self._pending_previous = -1
+
+    def _buffer_ready(self, index, buffer):
+        if index != self.active or not self._loaded or not self._handoff_pending or not self.clip or not buffer.isValid():
+            return
+        start = round(self.clip.get('start', 0) * 1000000)
+        # Ignore buffers queued before a nonzero clip offset was applied.
+        if buffer.startTime() >= 0 and buffer.startTime() + buffer.duration() <= start:
+            return
+        if not self._handoff_queued and (buffer_has_audio(buffer) or buffer.startTime() >= start + 500000):
+            self._handoff_queued = True
+            token = self._token
+            # Change playback only after returning from the buffer callback.
+            QTimer.singleShot(0, self, lambda: self._begin_handoff() if token == self._token else None)
 
     def _media_status(self, index, status):
         if index != self.active or not self.clip or self.players[index].source() != self._source:
@@ -82,7 +137,7 @@ class MusicBoxPlayer(QObject):
                 return
             player.setPosition(start)
             fade = self.fades[index]
-            fade.setDuration(int(self.clip.get('fade_ms', 180)))
+            fade.setDuration(15 if self._handoff_pending else int(self.clip.get('fade_ms', 180)))
             fade.setStartValue(0)
             fade.setEndValue(self._volume())
             fade.start()
@@ -93,6 +148,9 @@ class MusicBoxPlayer(QObject):
     def _position(self, index, position):
         if index != self.active or not self.clip or not self._loaded or self._ended:
             return
+        # Also works on older Qt/backends without decoded-buffer notifications.
+        if self._handoff_pending and position >= round(self.clip.get('start', 0) * 1000) + 500:
+            self._begin_handoff()
         duration = float(self.clip.get('duration', 0))
         if duration > 0 and position >= round((self.clip.get('start', 0) + duration) * 1000):
             self._clip_end()
@@ -118,7 +176,10 @@ class MusicBoxPlayer(QObject):
         self.active = -1
         self.clip = None
         self._source = QUrl()
-        for fade, player in zip(self.fades, self.players):
+        self._handoff_pending = False
+        self._handoff_queued = False
+        self._pending_previous = -1
+        for index, (fade, player) in enumerate(zip(self.fades, self.players)):
             fade.stop()
             player.stop()
             player.setSource(QUrl())
