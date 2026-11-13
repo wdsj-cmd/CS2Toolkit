@@ -1,6 +1,7 @@
 import os
 import json
 import threading
+import time
 from PySide6.QtWidgets import QApplication, QFileDialog, QListWidgetItem
 from PySide6.QtCore import Qt, QTimer, Signal, QObject
 from PySide6.QtGui import QImage, QIcon, QDesktopServices
@@ -536,6 +537,7 @@ class CS2Tool(FluentWindow):
                 data_str = data_bytes.decode('utf-8', errors='ignore')
 
             game_state = json.loads(data_str)
+            game_state['_toolkit_received_at'] = time.monotonic()
             self.gsi_signal_emitter.data_received.emit(game_state)
         except (json.JSONDecodeError, Exception):
             pass # Ignore malformed data

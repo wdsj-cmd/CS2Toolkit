@@ -77,6 +77,10 @@ class MusicEventEngine:
         self.local_id = ''
         self.planting_player = ''
         self.planter_id = ''
+        self.planter_source = ''
+        self._local_inventory = None
+        self._local_c4_loss = None
+        self.plant_evidence = {}
         self.round_result = ''
         self.round_paused = False
         self.paused_at = None
@@ -106,6 +110,8 @@ class MusicEventEngine:
             self.round_deadline = self.bomb_deadline = None
             self.round_number = round_number
             self.planting_player = self.planter_id = ''
+            self.planter_source = ''
+            self._local_inventory = self._local_c4_loss = None
             if object_node(state.get('round')).get('phase') != 'over':
                 self.round_result = ''
         self.last_update = now
@@ -125,19 +131,28 @@ class MusicEventEngine:
             self.team = player['team']
         health = number(player_state.get('health')) if local else None
         mvps = number(object_node(player.get('match_stats')).get('mvps')) if local else None
-        bomb_state = bomb.get('state') or round_info.get('bomb', '')
+        raw_bomb_state = bomb.get('state', '')
+        round_bomb_state = round_info.get('bomb', '')
+        bomb_state = raw_bomb_state or round_bomb_state
+        # round.bomb can announce a completed plant before the detailed bomb
+        # node catches up. Do not wait for that second update to start music.
+        if round_bomb_state in ('planted', 'defused', 'exploded') and raw_bomb_state in ('', 'carried', 'dropped', 'planting'):
+            bomb_state = round_bomb_state
         planted = bomb_state in ('planted', 'defusing')
         # The identity on a planting packet is the planter. The identity on a
         # defusing packet is the defuser, and must never replace the planter.
-        if bomb_state == 'planting':
+        if raw_bomb_state == 'planting' and self.bomb_state not in ('planted', 'defusing'):
             identity = str(bomb.get('player') or '')
             self.planting_player = identity if identity.isdecimal() and len(identity) == 17 else ''
-        elif planted and self.bomb_state == 'planting':
+        if planted and self.planting_player and self.bomb_state not in ('planted', 'defusing'):
             self.planter_id = self.planting_player
+            self.planter_source = 'gsi'
             self.planting_player = ''
         elif bomb_state in ('carried', 'dropped', 'defused', 'exploded'):
             self.planting_player = ''
             self.planter_id = ''
+            self.planter_source = ''
+        self._track_local_plant(player, local, health, planted, now)
         candidates = []
         entered_menu = activity == 'menu' and not phase and map_info.get('phase') not in ('live', 'warmup')
         if entered_menu:
@@ -148,6 +163,8 @@ class MusicEventEngine:
             self.round_deadline = self.bomb_deadline = None
             self.bomb_state = ''
             self.planting_player = self.planter_id = ''
+            self.planter_source = ''
+            self._local_inventory = self._local_c4_loss = None
             self.ten_played.clear()
         else:
             if self.activity == 'menu':
@@ -157,6 +174,8 @@ class MusicEventEngine:
                 self.ten_played.clear()
                 self.round_deadline = self.bomb_deadline = None
                 self.planting_player = self.planter_id = ''
+                self.planter_source = ''
+                self._local_c4_loss = None
                 self.round_result = ''
             elif phase == 'live' and self.phase == 'freezetime':
                 candidates.append('round_start')
@@ -206,7 +225,7 @@ class MusicEventEngine:
                     self.bomb_deadline = now + remaining
                     self.bomb_estimated = False
             bomb_remaining = number(bomb.get('countdown'))
-            if bomb_state == 'planted' and bomb_remaining is not None and bomb_remaining >= 0:
+            if raw_bomb_state == 'planted' and bomb_remaining is not None and bomb_remaining >= 0:
                 self.bomb_deadline = now + bomb_remaining
                 self.bomb_estimated = False
             if phase in ('freezetime', 'over') or bomb_state in ('defused', 'exploded'):
@@ -221,6 +240,41 @@ class MusicEventEngine:
         if bomb_state in ('defused', 'exploded') and self.current_cue and self.current_cue.event.startswith('bomb_'):
             return self._emit('stop', now)
         return None
+
+    def _track_local_plant(self, player, local, health, planted, now):
+        self.plant_evidence = {'local': bool(local), 'alive': health is not None and health > 0}
+        if not local or health is None or health <= 0:
+            self._local_inventory = self._local_c4_loss = None
+            return
+        weapons = player.get('weapons')
+        if not isinstance(weapons, dict):
+            self.plant_evidence['inventory_available'] = False
+            return
+        c4 = next((w for w in weapons.values() if isinstance(w, dict) and w.get('name') == 'weapon_c4'), None)
+        stats = object_node(player.get('match_stats'))
+        snapshot = {'has_c4': c4 is not None, 'active': c4 is not None and c4.get('state') == 'active',
+                    'money': number(object_node(player.get('state')).get('money')),
+                    'score': number(stats.get('score')), 'kills': number(stats.get('kills')),
+                    'assists': number(stats.get('assists')), 'time': now}
+        previous = self._local_inventory
+        if c4 is not None:
+            self._local_c4_loss = None
+        elif previous and previous['has_c4'] and previous['active'] and now - previous['time'] <= 2.5:
+            self._local_c4_loss = previous
+        evidence = self._local_c4_loss
+        self.plant_evidence.update(inventory_available=True, c4_now=snapshot['has_c4'],
+            c4_active_before=bool(previous and previous['active']), c4_loss=evidence is not None)
+        if planted and not self.planter_id and self.local_id and evidence and now - evidence['time'] <= 2.5:
+            no_combat_reward = all(snapshot[key] is not None and snapshot[key] == evidence[key]
+                                   for key in ('kills', 'assists'))
+            plant_reward = any(snapshot[key] is not None and evidence[key] is not None
+                               and snapshot[key] - evidence[key] == reward
+                               for key, reward in (('money', 300), ('score', 2)))
+            self.plant_evidence.update(combat_unchanged=no_combat_reward, reward=plant_reward)
+            if not snapshot['has_c4'] and no_combat_reward and plant_reward:
+                self.planter_id = self.local_id
+                self.planter_source = 'inventory_reward'
+        self._local_inventory = snapshot
 
     def _warning(self, now):
         planted = self.bomb_state in ('planted', 'defusing')

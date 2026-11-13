@@ -16,6 +16,7 @@ class MusicBoxController(QObject):
     changed = Signal()
     status_changed = Signal(str)
     error = Signal(str)
+    diagnostic = Signal(str, dict)
 
     def __init__(self, config_manager, parent=None, player=None):
         super().__init__(parent)
@@ -36,6 +37,10 @@ class MusicBoxController(QObject):
         self.player.set_volume(self.settings['volume'])
         self.player.failed.connect(self._failed)
         self.player.finished.connect(self._finished)
+        if hasattr(self.player, 'started'):
+            self.player.started.connect(self._audio_loaded)
+        self._audio_request = None
+        self._bomb_signature = None
         self.kit = None
         self.previewing = False
         self.status = '未启用，准备好音乐切片后即可配置'
@@ -121,21 +126,49 @@ class MusicBoxController(QObject):
         first = self._last_gsi is None
         self._last_gsi = time.monotonic()
         cue = self.engine.process(state)
+        received = state.get('_toolkit_received_at', self._last_gsi)
+        queue_ms = max(0, (self._last_gsi - received) * 1000) if isinstance(received, (int, float)) else None
+        relation = ('self' if self.engine.planter_id == self.engine.local_id else 'other') if self.engine.planter_id else 'unknown'
+        signature = (self.engine.bomb_state, relation, self.engine.planter_source)
+        if signature != self._bomb_signature and self.engine.bomb_state:
+            self.diagnostic.emit('music_bomb_state', {'state': self.engine.bomb_state, 'owner': relation,
+                'owner_source': self.engine.planter_source or 'unavailable', 'ui_queue_ms': queue_ms,
+                'evidence': dict(self.engine.plant_evidence)})
+        self._bomb_signature = signature
+        self._update_tick_rate()
         if cue and self.enabled and not self.previewing:
             self._play_cue(cue)
         elif first and self.enabled and not self.previewing:
             self._status('游戏数据已连接，等待音乐事件')
 
+    def _update_tick_rate(self):
+        deadline = self.engine.bomb_deadline if self.engine.bomb_state in ('planted', 'defusing') else self.engine.round_deadline
+        urgent = self.enabled and deadline is not None and 0 < deadline - time.monotonic() <= 11
+        interval = 50 if urgent else 200
+        if self.tick_timer.interval() != interval:
+            self.tick_timer.setInterval(interval)
+
+    def _audio_loaded(self):
+        if self._audio_request:
+            event, started, received = self._audio_request
+            self._audio_request = None
+            self.diagnostic.emit('music_audio_loaded', {'cue': event,
+                'load_ms': round((time.monotonic() - started) * 1000, 2),
+                'cue_to_loaded_ms': round((time.monotonic() - received) * 1000, 2)})
+
     def _play_cue(self, cue, resume=False):
+        self._audio_request = None
         if cue.event == 'stop':
             self.player.stop()
             self._status('已进入对局，等待下一个音乐事件')
             return
         clips = self.kit['tracks'].get(cue.event, []) if self.kit else []
+        used_fallback = False
         if not clips and self.kit:
             fallback = ('bomb_ten_seconds' if cue.event in ('bomb_ten_seconds_self', 'bomb_ten_seconds_other')
                         else self.engine.round_result if cue.event == 'mvp' else '')
             clips = self.kit['tracks'].get(fallback, [])
+            used_fallback = bool(clips)
         if not clips:
             # A phase change must not leave the previous phase's loop playing.
             self.player.stop()
@@ -153,15 +186,22 @@ class MusicBoxController(QObject):
                 clip['duration'] -= elapsed
         try:
             path = self.library.resolve(self.kit, clip)
+            clip['fade_ms'] = 50 if cue.event.startswith('bomb_') else 180
+            self._audio_request = (cue.event, time.monotonic(), cue.started)
+            self.diagnostic.emit('music_cue', {'cue': cue.event, 'fallback': used_fallback,
+                'owner_source': self.engine.planter_source or 'unavailable'})
             if self.player.play(path, clip):
                 estimated = ((cue.event.startswith('bomb_ten_seconds') and self.engine.bomb_estimated)
                              or (cue.event == 'round_ten_seconds' and self.engine.round_estimated))
                 self._status('正在播放 · ' + SLOT_MAP[cue.event].title + ('（估算计时）' if estimated else '')
+                             + ('（通用兜底）' if used_fallback and cue.event.startswith('bomb_ten_seconds') else '')
+                             + ('（安包者未知）' if cue.event == 'bomb_ten_seconds' else '')
                              + ' · ' + clip.get('name', path.name))
         except (OSError, ValueError) as exc:
             self._failed(str(exc))
 
     def preview(self, event, clip=None):
+        self._audio_request = None
         if clip is None:
             clips = self.kit['tracks'].get(event, []) if self.kit else []
             if not clips:
@@ -189,6 +229,7 @@ class MusicBoxController(QObject):
         self._status('播放结束，等待下一个音乐事件')
 
     def _failed(self, message):
+        self._audio_request = None
         self.player.stop()
         self.previewing = False
         self._status('播放提示 · ' + message)
@@ -204,11 +245,13 @@ class MusicBoxController(QObject):
                 self._status('试听已结束')
 
     def stop(self):
+        self._audio_request = None
         self.previewing = False
         self.player.stop()
         self._status('已停止，新的游戏事件或试听可再次开始播放')
 
     def _tick(self):
+        self._update_tick_rate()
         if self._last_gsi is not None and time.monotonic() - self._last_gsi > 5:
             self.engine.reset()
             self._last_gsi = None

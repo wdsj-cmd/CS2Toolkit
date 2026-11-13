@@ -77,7 +77,7 @@ class GSIManager:
     "timeout" "1.0"
     "buffer"  "0.0"
     "throttle" "0.0"
-    "heartbeat" "1.0"
+    "heartbeat" "0.2"
     "auth"
     {{
         "token" "TOKEN"
