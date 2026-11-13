@@ -12,6 +12,7 @@ from PySide6.QtGui import QImage
 from .flash_background import BufferedDesktopFrameSource
 from .game_window import GameWindowTracker
 
+MAX_CLOCK_READS = 8
 
 def round_clock_region(geometry):
     x, y, width, height = geometry
@@ -158,6 +159,8 @@ class RoundClockMonitor(QObject):
             readings = ClockReadings()
             key = None
             was_foreground = False
+            was_active = False
+            attempts = 0
             game_hwnd, last_find = None, 0
             next_sample = 0
             while not self._stop.is_set():
@@ -165,6 +168,7 @@ class RoundClockMonitor(QObject):
                 with self._lock:
                     context = self._context
                 hwnd = None
+                active = False
                 if context:
                     current, active, received, watch = context
                     if current != key:
@@ -179,6 +183,11 @@ class RoundClockMonitor(QObject):
                 if hwnd and not was_foreground:
                     self.resync_requested.emit(key)
                     next_sample = 0
+                    attempts = 0
+                if active and not was_active:
+                    readings.reset()
+                    attempts = 0
+                was_active = active
                 was_foreground = bool(hwnd)
                 if not hwnd:
                     readings.reset()
@@ -192,6 +201,11 @@ class RoundClockMonitor(QObject):
                         source.close()
                         source = None
                     self._status('本回合已同步，停止读取画面')
+                elif attempts >= MAX_CLOCK_READS:
+                    if source is not None:
+                        source.close()
+                        source = None
+                    self._status('未读到计时器，等待切回游戏或下一回合')
                 elif now >= next_sample:
                     geometry = tracker.client_geometry(hwnd)
                     if geometry:
@@ -199,6 +213,7 @@ class RoundClockMonitor(QObject):
                             reader = self.reader_factory()
                         if source is None:
                             source = self.source_factory()
+                        attempts += 1
                         observed_at = time.monotonic()
                         frame = source.grab(round_clock_region(geometry))
                         if frame is not None and not frame.isNull():
