@@ -165,9 +165,9 @@ class BombVisualMonitor(QObject):
             self.status = text
             self.status_changed.emit(text)
 
-    def set_context(self, key, phase, confirmed, received_at, learn_after=None, blocked=False):
+    def set_context(self, key, phase, confirmed, received_at, learn_after=None, blocked=False, team_pending=False):
         with self._lock:
-            self._context = (key, phase, confirmed, received_at, learn_after, blocked)
+            self._context = (key, phase, confirmed, received_at, learn_after, blocked, team_pending)
 
     def start(self):
         if self._thread and self._thread.is_alive():
@@ -216,15 +216,22 @@ class BombVisualMonitor(QObject):
             was_foreground = False
             old_keys = (False, False, False)
             last_menu_request, menu_request_source = None, ''
+            watched_map, map_entry_until = None, 0
             while not self._stop.is_set():
                 tick = time.monotonic()
                 with self._lock:
                     context = self._context
-                active = eligible = foreground = False
+                active = eligible = foreground = watch_initial = False
                 if context:
-                    key, phase, confirmed, received_at, learn_after, blocked = context
+                    key, phase, confirmed, received_at, learn_after, blocked, team_pending = context
                     matcher.update_context(key, phase, confirmed)
-                    eligible = bool(key[0] and phase in ('live', 'freezetime', 'over') and tick - received_at <= 3)
+                    if key[0] != watched_map:
+                        watched_map = key[0]
+                        # Early packets can still describe a previous spectator
+                        # or team. Confirm the actual picker during map entry.
+                        map_entry_until = tick + 15 if watched_map else 0
+                    watch_initial = bool(key[0] and (team_pending or tick < map_entry_until))
+                    eligible = bool(key[0] and phase in ('', 'live', 'freezetime', 'over') and tick - received_at <= 3)
                     active = phase == 'live' and tick - received_at <= 3 and not blocked
                     active = active and not (confirmed and matcher.template is not None)
                     if matcher.template is None:
@@ -253,7 +260,7 @@ class BombVisualMonitor(QObject):
                         if changed is not None:
                             self.team_menu_changed.emit(changed)
                     old_keys = keys
-                    if team_menu.due(tick):
+                    if team_menu.due(tick, watch_initial):
                         geometry = tracker.client_geometry(hwnd)
                         if geometry:
                             if team_source is None:
@@ -265,6 +272,8 @@ class BombVisualMonitor(QObject):
                                         'request_to_confirm_ms': round((time.monotonic() - last_menu_request) * 1000, 1)
                                         if last_menu_request is not None else None})
                                 self.team_menu_changed.emit(changed)
+                        else:
+                            team_menu.next_probe = tick + .1
                 else:
                     old_keys = (False, False, False)
                     if not eligible:
@@ -272,7 +281,7 @@ class BombVisualMonitor(QObject):
                         if changed is not None:
                             self.team_menu_changed.emit(changed)
                 was_foreground = foreground
-                if team_source is not None and (not foreground or (not team_menu.visible and tick >= team_menu.pending_until)):
+                if team_source is not None and (not foreground or (not watch_initial and not team_menu.visible and tick >= team_menu.pending_until)):
                     team_source.close()
                     team_source = None
                 active = active and foreground and not team_menu.visible
@@ -309,7 +318,7 @@ class BombVisualMonitor(QObject):
                 interval = .02 if eligible else .1
                 if active:
                     interval = min(interval, next_capture - now)
-                if foreground and (team_menu.visible or tick < team_menu.pending_until):
+                if foreground and (watch_initial or team_menu.visible or tick < team_menu.pending_until):
                     interval = min(interval, team_menu.next_probe - now)
                 self._stop.wait(max(.001, interval))
         except Exception:

@@ -49,6 +49,7 @@ class MusicBoxController(QObject):
         self._cue_choice = None
         self._bomb_signature = None
         self._bomb_input_signature = None
+        self._team_state_signature = None
         self.kit = None
         self.previewing = False
         self.status = '未启用，准备好音乐切片后即可配置'
@@ -180,7 +181,8 @@ class MusicBoxController(QObject):
         self.visual_monitor.set_context(
             (self.engine.map_name, self.engine.round_number), self.engine.phase, confirmed, received,
             learn_after=learned_after + .5 if learned_after is not None else None,
-            blocked=bool(flashed and flashed > 0))
+            blocked=bool(flashed and flashed > 0),
+            team_pending=bool(self.engine.map_name and not self.engine.team_selection_done))
 
     def _on_visual_bomb(self, observed_at):
         if self._closed or not self.enabled:
@@ -222,6 +224,15 @@ class MusicBoxController(QObject):
         self._last_gsi = time.monotonic()
         cue = self.engine.process(state)
         self._update_visual_context(state)
+        player = object_node(state.get('player'))
+        map_info = object_node(state.get('map'))
+        team_state = (self.engine.map_name, map_info.get('phase'), self.engine.phase,
+                      player.get('activity'), player.get('team'), self.engine.selecting_team,
+                      self.engine.team_selection_done)
+        if team_state != self._team_state_signature:
+            self._team_state_signature = team_state
+            self.diagnostic.emit('music_team_state', dict(zip(
+                ('map', 'map_phase', 'round_phase', 'activity', 'team', 'selecting', 'selection_done'), team_state)))
         if self.settings['gsi_plant_delay_ms'] != self.engine.gsi_plant_delay_ms:
             self.settings['gsi_plant_delay_ms'] = self.engine.gsi_plant_delay_ms
             self._queue_save()

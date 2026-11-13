@@ -93,8 +93,8 @@ class TeamMenuDetector:
         self.pending_until = now + (.2 if initial else .6)
         self.next_probe = now + .04
 
-    def due(self, now):
-        return now >= self.next_probe and (self.visible or now < self.pending_until)
+    def due(self, now, watch_initial=False):
+        return now >= self.next_probe and (self.visible or now < self.pending_until or watch_initial)
 
     def dismiss(self):
         previous = self.visible
@@ -121,4 +121,8 @@ class TeamMenuDetector:
                 self.visible = False
                 changed = False
             self.next_probe = now + .06
+        if not self.visible and not self.hits and now >= self.pending_until:
+            # Initial map entry has no M press and can take several frames to
+            # open the picker. Observe at 2.5 fps outside an explicit request.
+            self.next_probe = now + .4
         return changed
