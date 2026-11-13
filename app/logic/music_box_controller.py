@@ -9,7 +9,7 @@ from .music_box_library import MusicKitLibrary, validate_clip
 from .music_box_player import MusicBoxPlayer
 
 DEFAULT_SETTINGS = {'enabled': False, 'volume': 50, 'selected_kit': '',
-                    'estimate_timers': True, 'bomb_seconds': 40, 'round_seconds': 115}
+                    'estimate_timers': True, 'bomb_seconds': 40, 'round_seconds': 115, 'c4_warning_lead_ms': 500}
 
 
 class MusicBoxController(QObject):
@@ -26,13 +26,14 @@ class MusicBoxController(QObject):
         saved = config_manager.get('music_box', {})
         if isinstance(saved, dict):
             self.settings.update({key: saved[key] for key in DEFAULT_SETTINGS if key in saved})
-        for key, low, high in (('volume', 0, 100), ('bomb_seconds', 11, 180), ('round_seconds', 11, 3600)):
+        for key, low, high in (('volume', 0, 100), ('bomb_seconds', 11, 180), ('round_seconds', 11, 3600), ('c4_warning_lead_ms', 0, 2000)):
             try:
                 self.settings[key] = max(low, min(high, int(self.settings[key])))
             except (TypeError, ValueError, OverflowError):
                 self.settings[key] = DEFAULT_SETTINGS[key]
         self.engine = MusicEventEngine(estimate_timers=self.settings['estimate_timers'],
-                                       bomb_seconds=self.settings['bomb_seconds'], round_seconds=self.settings['round_seconds'])
+                                       bomb_seconds=self.settings['bomb_seconds'], round_seconds=self.settings['round_seconds'],
+                                       warning_lead_ms=self.settings['c4_warning_lead_ms'])
         self.player = player or MusicBoxPlayer(self)
         self.player.set_volume(self.settings['volume'])
         self.player.failed.connect(self._failed)
@@ -120,6 +121,11 @@ class MusicBoxController(QObject):
             self.engine.bomb_deadline = None
         self._queue_save()
 
+    def set_warning_lead(self, milliseconds):
+        value = max(0, min(2000, int(milliseconds)))
+        self.settings['c4_warning_lead_ms'] = self.engine.warning_lead_ms = value
+        self._queue_save()
+
     def process_gsi(self, state):
         if self._closed:
             return
@@ -129,10 +135,12 @@ class MusicBoxController(QObject):
         received = state.get('_toolkit_received_at', self._last_gsi)
         queue_ms = max(0, (self._last_gsi - received) * 1000) if isinstance(received, (int, float)) else None
         relation = ('self' if self.engine.planter_id == self.engine.local_id else 'other') if self.engine.planter_id else 'unknown'
-        signature = (self.engine.bomb_state, relation, self.engine.planter_source)
+        signature = (self.engine.bomb_state, relation, self.engine.planter_source, self.engine.server_bomb_planted)
         if signature != self._bomb_signature and self.engine.bomb_state:
             self.diagnostic.emit('music_bomb_state', {'state': self.engine.bomb_state, 'owner': relation,
+                'server_plant_seen': self.engine.server_bomb_planted,
                 'owner_source': self.engine.planter_source or 'unavailable', 'ui_queue_ms': queue_ms,
+                'local_anchor_age_ms': round((time.monotonic() - self.engine.local_plant_time) * 1000, 1) if self.engine.local_plant_time is not None else None,
                 'evidence': dict(self.engine.plant_evidence)})
         self._bomb_signature = signature
         self._update_tick_rate()
@@ -143,7 +151,7 @@ class MusicBoxController(QObject):
 
     def _update_tick_rate(self):
         deadline = self.engine.bomb_deadline if self.engine.bomb_state in ('planted', 'defusing') else self.engine.round_deadline
-        urgent = self.enabled and deadline is not None and 0 < deadline - time.monotonic() <= 11
+        urgent = self.enabled and deadline is not None and 0 < deadline - time.monotonic() <= 11 + self.engine.warning_lead_ms / 1000
         interval = 50 if urgent else 200
         if self.tick_timer.interval() != interval:
             self.tick_timer.setInterval(interval)
@@ -189,6 +197,7 @@ class MusicBoxController(QObject):
             clip['fade_ms'] = 50 if cue.event.startswith('bomb_') else 180
             self._audio_request = (cue.event, time.monotonic(), cue.started)
             self.diagnostic.emit('music_cue', {'cue': cue.event, 'fallback': used_fallback,
+                'c4_warning_lead_ms': self.engine.warning_lead_ms,
                 'owner_source': self.engine.planter_source or 'unavailable'})
             if self.player.play(path, clip):
                 estimated = ((cue.event.startswith('bomb_ten_seconds') and self.engine.bomb_estimated)

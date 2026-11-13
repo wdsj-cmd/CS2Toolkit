@@ -246,7 +246,15 @@ class MusicBoxPage(ScrollArea):
         self.round_seconds.setSuffix(' 秒')
         row.addWidget(self.round_seconds)
         timing_layout.addLayout(row)
-        hint = CaptionLabel('优先使用游戏倒计时。缺失时按服务器时长估算；修改时长从下一次回合或安包生效。', timing)
+        row = QHBoxLayout()
+        row.addWidget(CaptionLabel('C4 十秒提示提前补偿', timing), 1)
+        self.warning_lead = SpinBox(timing)
+        self.warning_lead.setRange(0, 2000)
+        self.warning_lead.setSingleStep(50)
+        self.warning_lead.setSuffix(' 毫秒')
+        row.addWidget(self.warning_lead)
+        timing_layout.addLayout(row)
+        hint = CaptionLabel('优先使用游戏倒计时；估算时长从下次回合或安包生效。提示仍偏晚可调大补偿，偏早则调小。', timing)
         hint.setWordWrap(True)
         timing_layout.addWidget(hint)
         self.layout.addWidget(timing)
@@ -286,6 +294,7 @@ class MusicBoxPage(ScrollArea):
         self.estimate.checkedChanged.connect(self._timing_changed)
         self.bomb_seconds.valueChanged.connect(self._timing_changed)
         self.round_seconds.valueChanged.connect(self._timing_changed)
+        self.warning_lead.valueChanged.connect(controller.set_warning_lead)
         self.stop_button.clicked.connect(controller.stop)
         self.create_button.clicked.connect(self._create)
         self.import_button.clicked.connect(self._import)
@@ -306,7 +315,7 @@ class MusicBoxPage(ScrollArea):
         self.volume.setValue(int(self.controller.settings['volume']))
         self.volume.blockSignals(False)
         self.volume_value.setText(f'{self.volume.value()}%')
-        for widget, key in ((self.estimate, 'estimate_timers'), (self.bomb_seconds, 'bomb_seconds'), (self.round_seconds, 'round_seconds')):
+        for widget, key in ((self.estimate, 'estimate_timers'), (self.bomb_seconds, 'bomb_seconds'), (self.round_seconds, 'round_seconds'), (self.warning_lead, 'c4_warning_lead_ms')):
             widget.blockSignals(True)
             if widget is self.estimate:
                 widget.setChecked(bool(self.controller.settings[key]))
