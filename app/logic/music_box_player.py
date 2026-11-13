@@ -60,11 +60,12 @@ class MusicBoxPlayer(QObject):
         if previous >= 0:
             fade = self.fades[previous]
             fade.stop()
-            fade.setDuration(180)
+            fade.setDuration(int(clip.get('fade_ms', 180)))
             fade.setStartValue(self.outputs[previous].volume())
             fade.setEndValue(0)
             fade.start()
-            QTimer.singleShot(200, lambda: self.players[previous].stop() if token == self._token else None)
+            QTimer.singleShot(int(clip.get('fade_ms', 180)) + 20,
+                              lambda: self.players[previous].stop() if token == self._token else None)
         self.players[current].setSource(self._source)
         self.players[current].play()
         return True
@@ -81,7 +82,7 @@ class MusicBoxPlayer(QObject):
                 return
             player.setPosition(start)
             fade = self.fades[index]
-            fade.setDuration(180)
+            fade.setDuration(int(self.clip.get('fade_ms', 180)))
             fade.setStartValue(0)
             fade.setEndValue(self._volume())
             fade.start()

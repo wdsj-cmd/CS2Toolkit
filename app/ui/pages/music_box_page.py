@@ -11,7 +11,7 @@ from qfluentwidgets import (
 )
 
 from app.logic.music_box_events import SLOTS, SLOT_MAP
-from app.logic.music_box_library import AUDIO_EXTENSIONS, validate_clip
+from app.logic.music_box_library import AUDIO_EXTENSIONS, event_options, validate_clip
 from app.ui.fluent_dialogs import TextInputDialog
 
 
@@ -43,9 +43,18 @@ class ClipDialog(MessageBoxBase):
         self.current = -1
         self.loading = False
         self.viewLayout.addWidget(SubtitleLabel(SLOT_MAP[event].title, self))
-        hint = BodyLabel('可添加多个备选切片，每次事件随机播放一个。音频会复制到工具的数据目录。', self)
+        options = event_options(controller.kit, event)
+        hint = BodyLabel('可添加多个备选切片。开启随机播放后，每次事件随机选一个；关闭时播放当前选中的切片。', self)
         hint.setWordWrap(True)
         self.viewLayout.addWidget(hint)
+        random_row = QHBoxLayout()
+        random_row.addWidget(BodyLabel('随机播放', self), 1)
+        self.random_play = SwitchButton(self)
+        self.random_play.setOnText('每次随机选一个切片')
+        self.random_play.setOffText('固定播放当前选中切片')
+        self.random_play.setChecked(options['random'])
+        random_row.addWidget(self.random_play)
+        self.viewLayout.addLayout(random_row)
         self.list = ListWidget(self)
         self.list.setFixedHeight(126)
         self.viewLayout.addWidget(self.list)
@@ -98,7 +107,10 @@ class ClipDialog(MessageBoxBase):
         self.volume.valueChanged.connect(self._store)
         self.loop.checkedChanged.connect(self._store)
         self.finished.connect(lambda _: controller.end_preview())
-        self._refresh()
+        self._refresh(options['selected_index'])
+
+    def playback_options(self):
+        return {'random': self.random_play.isChecked(), 'selected_index': max(0, self.current)}
 
     def _refresh(self, selected=0):
         self.current = -1
@@ -246,7 +258,15 @@ class MusicBoxPage(ScrollArea):
         self.round_seconds.setSuffix(' 秒')
         row.addWidget(self.round_seconds)
         timing_layout.addLayout(row)
-        hint = CaptionLabel('优先使用游戏倒计时。缺失时按服务器时长估算；修改时长从下一次回合或安包生效。', timing)
+        row = QHBoxLayout()
+        row.addWidget(CaptionLabel('C4 十秒提示提前补偿', timing), 1)
+        self.warning_lead = SpinBox(timing)
+        self.warning_lead.setRange(0, 2000)
+        self.warning_lead.setSingleStep(50)
+        self.warning_lead.setSuffix(' 毫秒')
+        row.addWidget(self.warning_lead)
+        timing_layout.addLayout(row)
+        hint = CaptionLabel('优先使用游戏倒计时；估算时长从下次回合或安包生效。提示仍偏晚可调大补偿，偏早则调小。', timing)
         hint.setWordWrap(True)
         timing_layout.addWidget(hint)
         self.layout.addWidget(timing)
@@ -286,6 +306,7 @@ class MusicBoxPage(ScrollArea):
         self.estimate.checkedChanged.connect(self._timing_changed)
         self.bomb_seconds.valueChanged.connect(self._timing_changed)
         self.round_seconds.valueChanged.connect(self._timing_changed)
+        self.warning_lead.valueChanged.connect(controller.set_warning_lead)
         self.stop_button.clicked.connect(controller.stop)
         self.create_button.clicked.connect(self._create)
         self.import_button.clicked.connect(self._import)
@@ -306,7 +327,7 @@ class MusicBoxPage(ScrollArea):
         self.volume.setValue(int(self.controller.settings['volume']))
         self.volume.blockSignals(False)
         self.volume_value.setText(f'{self.volume.value()}%')
-        for widget, key in ((self.estimate, 'estimate_timers'), (self.bomb_seconds, 'bomb_seconds'), (self.round_seconds, 'round_seconds')):
+        for widget, key in ((self.estimate, 'estimate_timers'), (self.bomb_seconds, 'bomb_seconds'), (self.round_seconds, 'round_seconds'), (self.warning_lead, 'c4_warning_lead_ms')):
             widget.blockSignals(True)
             if widget is self.estimate:
                 widget.setChecked(bool(self.controller.settings[key]))
@@ -324,7 +345,7 @@ class MusicBoxPage(ScrollArea):
             self.kits.setPlaceholderText('先新建或导入音乐盒')
         self.kits.blockSignals(False)
         count = sum(bool(clips) for clips in kit['tracks'].values()) if kit else 0
-        self.summary.setText(f'已配置 {count} / {len(SLOTS)} 个事件；多个备选切片随机播放。' if kit
+        self.summary.setText(f'已配置 {count} / {len(SLOTS)} 个事件；可在各事件设置中选择随机或固定播放。' if kit
                              else '音乐盒还没有音频。点击“新建”开始配置，或导入已有音乐包。')
         for widget in (self.kits, self.create_button, self.import_button):
             widget.setEnabled(not busy)
@@ -332,7 +353,8 @@ class MusicBoxPage(ScrollArea):
             widget.setEnabled(bool(kit) and not busy)
         for key, (label, preview, edit) in self.cards.items():
             clips = kit['tracks'].get(key, []) if kit else []
-            label.setText(f'{len(clips)} 个切片' if clips else '未设置切片')
+            mode = '随机播放' if kit and event_options(kit, key)['random'] else '固定播放'
+            label.setText(f'{len(clips)} 个切片 · {mode}' if clips else '未设置切片')
             preview.setEnabled(bool(clips) and not busy)
             edit.setEnabled(bool(kit) and not busy)
 
@@ -383,8 +405,9 @@ class MusicBoxPage(ScrollArea):
         dialog = ClipDialog(self.controller, event, self.window())
         if dialog.exec():
             clips = dialog.clips
+            options = dialog.playback_options()
             self.controller.stop()
-            self._run_job(lambda: self.controller.library.assign(kit_id, event, clips), '切片已保存')
+            self._run_job(lambda: self.controller.library.assign(kit_id, event, clips, options), '切片已保存')
         dialog.deleteLater()
 
     def _import(self):

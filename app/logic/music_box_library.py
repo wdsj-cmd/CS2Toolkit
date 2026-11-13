@@ -16,6 +16,24 @@ AUDIO_EXTENSIONS = {'.mp3', '.wav', '.flac', '.ogg', '.m4a', '.aac', '.wma', '.o
 MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
 
 
+def validate_event_options(options, clip_count):
+    if options is None:
+        options = {}
+    if not isinstance(options, dict):
+        raise ValueError('事件播放设置格式不正确')
+    random_play = options.get('random', True)
+    selected = options.get('selected_index', 0)
+    if not isinstance(random_play, bool) or type(selected) is not int:
+        raise ValueError('随机播放或固定切片设置无效')
+    return {'random': random_play,
+            'selected_index': max(0, min(selected, clip_count - 1))}
+
+
+def event_options(kit, event):
+    return validate_event_options(kit.get('event_options', {}).get(event),
+                                  len(kit['tracks'].get(event, [])))
+
+
 def validate_clip(clip, event):
     if not isinstance(clip, dict):
         raise ValueError('切片配置格式不正确')
@@ -80,12 +98,16 @@ class MusicKitLibrary:
         if not isinstance(data, dict) or not isinstance(data.get('tracks'), dict):
             raise ValueError('音乐盒配置无效')
         result = {'id': kit_id, 'name': str(data.get('name') or '未命名音乐盒')[:100],
-                  'format': 'cs2toolkit.music_kit', 'version': 1, 'tracks': {}}
+                  'format': 'cs2toolkit.music_kit', 'version': 1, 'tracks': {}, 'event_options': {}}
+        options = data.get('event_options', {})
+        if not isinstance(options, dict):
+            raise ValueError('事件播放设置格式不正确')
         for event in SLOT_MAP:
             clips = data['tracks'].get(event, [])
             if not isinstance(clips, list) or len(clips) > 64:
                 raise ValueError('切片数量或格式无效')
             result['tracks'][event] = [validate_clip(clip, event) for clip in clips]
+            result['event_options'][event] = validate_event_options(options.get(event), len(clips))
             for clip in result['tracks'][event]:
                 self.resolve(result, clip)
         return result
@@ -94,7 +116,8 @@ class MusicKitLibrary:
         if not name.strip():
             raise ValueError('请输入音乐盒名称')
         kit = {'id': uuid.uuid4().hex, 'name': name.strip()[:100], 'format': 'cs2toolkit.music_kit',
-               'version': 1, 'tracks': {event: [] for event in SLOT_MAP}}
+               'version': 1, 'tracks': {event: [] for event in SLOT_MAP},
+               'event_options': {event: validate_event_options(None, 0) for event in SLOT_MAP}}
         self._save(kit)
         return kit
 
@@ -114,10 +137,11 @@ class MusicKitLibrary:
             raise ValueError('音频路径或类型无效')
         return path
 
-    def assign(self, kit_id, event, clips):
+    def assign(self, kit_id, event, clips, options=None):
         if event not in SLOT_MAP or len(clips) > 64:
             raise ValueError('事件或切片数量无效')
         kit = self.load(kit_id)
+        options = validate_event_options(options if options is not None else event_options(kit, event), len(clips))
         folder = self.directory(kit_id) / 'audio'
         folder.mkdir(exist_ok=True)
         assigned = []
@@ -143,6 +167,7 @@ class MusicKitLibrary:
             clip['path'] = destination.relative_to(self.directory(kit_id)).as_posix()
             assigned.append(clip)
         kit['tracks'][event] = assigned
+        kit['event_options'][event] = options
         self._save(kit)
         return kit
 
@@ -202,7 +227,11 @@ class MusicKitLibrary:
             if not isinstance(data, dict):
                 raise ValueError('音乐包清单无效')
             name = str(data.get('name') or data.get('Name') or Path(filename).stem)[:100]
-            kit = {'id': kit_id, 'name': name, 'format': 'cs2toolkit.music_kit', 'version': 1, 'tracks': {}}
+            kit = {'id': kit_id, 'name': name, 'format': 'cs2toolkit.music_kit', 'version': 1,
+                   'tracks': {}, 'event_options': {}}
+            options = data.get('event_options', {})
+            if not isinstance(options, dict):
+                raise ValueError('事件播放设置格式不正确')
             for slot in SLOTS:
                 if isinstance(data.get('tracks'), dict):
                     raw = data['tracks'].get(slot.key, [])
@@ -216,6 +245,7 @@ class MusicKitLibrary:
                            for p in raw if isinstance(p, dict) and p.get('Path')]
                 if not isinstance(raw, list) or len(raw) > 64:
                     raise ValueError('切片格式或数量无效')
+                kit['event_options'][slot.key] = validate_event_options(options.get(slot.key), len(raw))
                 kit['tracks'][slot.key] = []
                 for value in raw:
                     clip = validate_clip(value, slot.key)
