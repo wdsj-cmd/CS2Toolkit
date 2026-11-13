@@ -162,6 +162,10 @@ class MusicEventEngine:
         player_state = object_node(player.get('state'))
         bomb = object_node(state.get('bomb'))
         phase = round_info.get('phase', '')
+        # The final scoreboard can retain a freezetime round packet. Match end
+        # takes precedence, including a delayed final MVP counter update.
+        if map_info.get('phase') == 'gameover':
+            phase = 'over'
         activity = player.get('activity', '')
         provider_id = str(object_node(state.get('provider')).get('steamid') or '')
         if provider_id:

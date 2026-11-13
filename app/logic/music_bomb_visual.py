@@ -206,7 +206,10 @@ class BombVisualMonitor(QObject):
                                 self._status('已学习，正在观察顶部 C4 图标')
                                 if matcher.check(image):
                                     self.detected.emit(observed_at)
-                self._stop.wait(max(.001, 1 / 6 - (time.monotonic() - tick)))
+                # Confirm a candidate promptly before the blinking icon fades;
+                # ordinary observation remains capped at six frames per second.
+                interval = .035 if matcher.hits == 1 and not matcher.fired else 1 / 6
+                self._stop.wait(max(.001, interval - (time.monotonic() - tick)))
         except Exception:
             self._status('图标识别不可用，当前使用 GSI')
         finally:

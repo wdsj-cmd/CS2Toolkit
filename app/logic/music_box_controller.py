@@ -57,7 +57,7 @@ class MusicBoxController(QObject):
         self._closed = False
         self.visual_monitor = BombVisualMonitor(config_manager.work_dir, self)
         self.visual_monitor.detected.connect(self._on_visual_bomb)
-        self.visual_monitor.status_changed.connect(self.visual_status_changed)
+        self.visual_monitor.status_changed.connect(self._visual_status)
         self.save_timer = QTimer(self)
         self.save_timer.setSingleShot(True)
         self.save_timer.timeout.connect(self._save)
@@ -124,6 +124,10 @@ class MusicBoxController(QObject):
             self.visual_monitor.start()
         else:
             self.visual_monitor.stop()
+
+    def _visual_status(self, text):
+        self.visual_status_changed.emit(text)
+        self.diagnostic.emit('music_bomb_visual_status', {'status': text})
 
     def set_visual_enabled(self, enabled):
         self.settings['c4_visual_enabled'] = bool(enabled)
