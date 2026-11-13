@@ -749,14 +749,18 @@ class VisualHandler(QObject):
                 self._round_start_kills = current_match_kills
 
             if current_match_kills > self._last_match_kills:
+                if self._round_start_kills > self._last_match_kills:
+                    self._round_start_kills = self._last_match_kills
                 self._last_match_kills = current_match_kills
                 current_round_kills = current_match_kills - self._round_start_kills
 
                 # 决定显示的图标
                 icon_to_show = ""
                 if self.kill_icon_is_advanced:
-                    idx = min(current_round_kills - 1, 4)
-                    icon_to_show = self.kill_icons_1_5[idx].get('path', '')
+                    idx = max(0, min(current_round_kills - 1, 4))
+                    icons = self.kill_icons_1_5 if isinstance(self.kill_icons_1_5, list) else []
+                    icon = icons[idx] if idx < len(icons) and isinstance(icons[idx], dict) else {}
+                    icon_to_show = icon.get('path', '')
                     if not icon_to_show or not os.path.exists(icon_to_show):
                         icon_to_show = self.kill_icon_path
                 else:
@@ -766,6 +770,7 @@ class VisualHandler(QObject):
                     self.signals.show_kill_icon.emit(icon_to_show)
             elif current_match_kills < self._last_match_kills:
                 self._last_match_kills = current_match_kills
+                self._round_start_kills = current_match_kills
         elif is_observing:
             match_stats = player.get('match_stats', {})
             self._last_match_kills = match_stats.get('kills', 0)
