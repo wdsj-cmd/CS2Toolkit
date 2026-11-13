@@ -31,12 +31,39 @@ def red_icon_mask(image):
     return (r >= 70) & (r > g + 35) & (r > b + 25)
 
 
+def icon_mask_focus(mask):
+    # The two edges of the clock crop can contain changing player portraits.
+    result = mask.copy()
+    result[:, :32] = False
+    result[:, 96:] = False
+    return result
+
+
+def icon_edge_band(mask):
+    padded = np.pad(mask, 1)
+    band = np.zeros_like(mask)
+    for y in range(3):
+        for x in range(3):
+            band |= padded[y:y + mask.shape[0], x:x + mask.shape[1]]
+    return band
+
+
 class BombIconMatcher:
     def __init__(self, template=None):
-        self.template = template
+        self.template = self.edge_band = None
+        if template is not None:
+            self._set_template(template)
         self.context = None
         self.armed = self.fired = False
         self.hits = self.misses = 0
+
+    def _set_template(self, mask):
+        mask = icon_mask_focus(mask)
+        if not 20 <= int(mask.sum()) <= 1400:
+            return False
+        self.template = mask
+        self.edge_band = icon_edge_band(mask)
+        return True
 
     def update_context(self, key, phase, confirmed):
         context = (key, phase in ('over', 'freezetime', ''))
@@ -52,20 +79,21 @@ class BombIconMatcher:
         self.hits = self.misses = 0
 
     def learn(self, image):
-        mask = red_icon_mask(image)
-        if not 20 <= int(mask.sum()) <= 1400:
+        if not self._set_template(red_icon_mask(image)):
             return False
-        self.template = mask.copy()
         self.fired = True  # Learning follows GSI; it must not replay that cue.
         return True
 
     def check(self, image):
         if self.template is None or self.fired:
             return False
-        mask = red_icon_mask(image)
-        overlap = int(np.logical_and(mask, self.template).sum())
-        match = (overlap / max(1, int(self.template.sum())) >= .80
-                 and overlap / max(1, int(mask.sum())) >= .72)
+        mask = icon_mask_focus(red_icon_mask(image))
+        overlap = int(np.logical_and(icon_edge_band(mask), self.template).sum())
+        # Blinking/antialiasing changes the red stroke width. Accept a one-pixel
+        # edge band while still requiring the original icon's shape to be present.
+        supported = int(np.logical_and(mask, self.edge_band).sum())
+        match = (overlap / max(1, int(self.template.sum())) >= .85
+                 and supported / max(1, int(mask.sum())) >= .85)
         if not match:
             self.hits = 0
             self.misses += 1
