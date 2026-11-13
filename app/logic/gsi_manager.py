@@ -91,7 +91,7 @@ class GSIManager:
     "data"
     {{
         "map_round_wins" "0"
-        "map" "0"
+        "map" "1"
         "player_id" "1"
         "player_match_stats" "1"
         "player_state" "1"
