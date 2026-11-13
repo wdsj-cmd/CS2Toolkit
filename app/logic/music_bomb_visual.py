@@ -146,6 +146,7 @@ class BombVisualMonitor(QObject):
     detected = Signal(float)
     status_changed = Signal(str)
     team_menu_changed = Signal(bool)
+    diagnostic = Signal(str, dict)
 
     def __init__(self, work_dir, parent=None, source_factory=None, tracker_factory=None):
         super().__init__(parent)
@@ -214,6 +215,7 @@ class BombVisualMonitor(QObject):
             next_capture = 0
             was_foreground = False
             old_keys = (False, False, False)
+            last_menu_request, menu_request_source = None, ''
             while not self._stop.is_set():
                 tick = time.monotonic()
                 with self._lock:
@@ -233,12 +235,20 @@ class BombVisualMonitor(QObject):
                     foreground = bool(hwnd and tracker.user32.GetForegroundWindow() == hwnd)
                 key_reader = getattr(tracker.user32, 'GetAsyncKeyState', None)
                 if foreground and key_reader is not None:
-                    keys = tuple(bool(key_reader(vk) & 0x8000) for vk in (0x4D, 0x1B, 0x01))
+                    key_states = tuple(int(key_reader(vk)) & 0xffff for vk in (0x4D, 0x1B, 0x01))
+                    keys = tuple(bool(value & 0x8000) for value in key_states)
+                    # Retain quick taps completed between polls; never consume
+                    # or suppress the keystroke delivered to the game.
+                    pressed = tuple((down and not old_keys[index]) or (was_foreground and bool(key_states[index] & 1))
+                                    for index, down in enumerate(keys))
                     if not was_foreground:
                         team_menu.request(tick, initial=True)
-                    if (keys[0] and not old_keys[0]) or (team_menu.visible and keys[2] and not old_keys[2]):
+                        last_menu_request, menu_request_source = tick, 'foreground'
+                    if pressed[0] or (team_menu.visible and pressed[2]):
                         team_menu.request(tick)
-                    if keys[1] and not old_keys[1]:
+                        last_menu_request, menu_request_source = tick, 'm_key' if pressed[0] else 'mouse'
+                        self.diagnostic.emit('music_team_menu_request', {'source': menu_request_source})
+                    if pressed[1]:
                         changed = team_menu.dismiss()
                         if changed is not None:
                             self.team_menu_changed.emit(changed)
@@ -250,6 +260,10 @@ class BombVisualMonitor(QObject):
                                 team_source = self.source_factory()
                             changed = team_menu.observe(team_source.grab(team_menu_region(geometry)), tick)
                             if changed is not None:
+                                if changed:
+                                    self.diagnostic.emit('music_team_menu_confirmed', {'source': menu_request_source,
+                                        'request_to_confirm_ms': round((time.monotonic() - last_menu_request) * 1000, 1)
+                                        if last_menu_request is not None else None})
                                 self.team_menu_changed.emit(changed)
                 else:
                     old_keys = (False, False, False)

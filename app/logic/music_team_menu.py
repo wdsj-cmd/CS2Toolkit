@@ -61,18 +61,25 @@ def _reference_signatures():
                  for data in _ICON_FEATURES)
 
 
-def is_team_menu(frame, references):
+def team_menu_scores(frame, references):
     if frame is None or frame.isNull() or frame.width() < frame.height() * 2:
-        return False
+        return ()
     side = frame.height()
+    scores = []
     for x, reference in zip((0, frame.width() - side), references):
         image = frame.copy(x, 0, side, side).scaled(16, 16, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
         image = image.convertToFormat(QImage.Format_RGB888)
         rgb = np.frombuffer(image.constBits(), dtype=np.uint8).reshape(16, image.bytesPerLine())[:, :48].reshape(16, 16, 3)
         signature = _signature(rgb)
-        if signature is None or float(np.dot(signature, reference)) < .86:
-            return False
-    return len(references) == 2
+        if signature is None:
+            return ()
+        scores.append(float(np.dot(signature, reference)))
+    return tuple(scores)
+
+
+def is_team_menu(frame, references):
+    scores = team_menu_scores(frame, references)
+    return len(scores) == 2 and min(scores) >= .86
 
 
 class TeamMenuDetector:
@@ -98,10 +105,12 @@ class TeamMenuDetector:
 
     def observe(self, frame, now):
         changed = None
-        if is_team_menu(frame, self.references):
+        scores = team_menu_scores(frame, self.references)
+        if len(scores) == 2 and min(scores) >= .86:
             self.hits += 1
             self.misses = 0
-            if self.hits >= 2 and not self.visible:
+            # Two very strong, independent emblem matches need no extra frame.
+            if (self.hits >= 2 or min(scores) >= .96) and not self.visible:
                 self.visible = True
                 changed = True
             self.next_probe = now + (.4 if self.visible else .06)

@@ -60,6 +60,7 @@ class MusicBoxController(QObject):
         self.visual_monitor.detected.connect(self._on_visual_bomb)
         self.visual_monitor.status_changed.connect(self._visual_status)
         self.visual_monitor.team_menu_changed.connect(self._on_team_menu)
+        self.visual_monitor.diagnostic.connect(self.diagnostic)
         self.save_timer = QTimer(self)
         self.save_timer.setSingleShot(True)
         self.save_timer.timeout.connect(self._save)
@@ -145,9 +146,12 @@ class MusicBoxController(QObject):
         self._team_menu_open = visible
         already_playing = False
         if visible:
+            was_previewing = self.previewing
+            if self.enabled:
+                self.previewing = False
             self._team_return_choice = self._cue_choice
             current = self.engine.current_cue
-            already_playing = bool(current and current.event == 'team_select' and self._cue_choice)
+            already_playing = bool(not was_previewing and current and current.event == 'team_select' and self._cue_choice)
             self._team_cue = current if current and current.event == 'team_select' else MusicCue('team_select', time.monotonic())
         else:
             self._cue_choice = self._team_return_choice
@@ -309,7 +313,9 @@ class MusicBoxController(QObject):
                 clip['duration'] -= elapsed
         try:
             path = self.library.resolve(self.kit, clip)
-            clip['fade_ms'] = 50 if cue.event.startswith('bomb_') else 180
+            if cue.event == 'team_select':
+                self.player.stop()
+            clip['fade_ms'] = 15 if cue.event == 'team_select' else 50 if cue.event.startswith('bomb_') else 180
             clip['seamless'] = cue.event.startswith('bomb_') or cue.event == 'round_ten_seconds'
             self._audio_request = (cue.event, time.monotonic(), cue.started)
             self.diagnostic.emit('music_cue', {'cue': cue.event, 'fallback': used_fallback,
