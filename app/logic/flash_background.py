@@ -4,6 +4,7 @@ import ctypes
 from ctypes import wintypes
 import threading
 import time
+import math
 
 from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QImage, QImageReader, QPainter
@@ -92,7 +93,7 @@ class DesktopFrameSource:
                     processor_backend='numpy', max_buffer_len=2)
             frame = self.cameras[key].grab(
                 region=(l - left, t - top, r - left, b - top),
-                copy=True, new_frame_only=False)
+                copy=False, new_frame_only=False)
             if frame is None:
                 continue
             frame[:, :, 3] = 255
@@ -118,7 +119,7 @@ class DesktopFrameSource:
 
 
 class PreFlashCache:
-    def __init__(self, source_factory=DesktopFrameSource, fps=20, memory_limit=96 * 1024 * 1024):
+    def __init__(self, source_factory=DesktopFrameSource, fps=12, memory_limit=64 * 1024 * 1024):
         self._source_factory = source_factory
         self._interval = 1 / fps
         self._memory_limit = memory_limit
@@ -164,6 +165,14 @@ class PreFlashCache:
     def _store(self, image, timestamp, generation=None):
         if image is None or image.isNull() or _is_whiteout(image):
             return False
+        # Keep at least four useful historical frames at large resolutions,
+        # without letting a 4K/8K screen exhaust the ring's memory budget.
+        pixels = image.width() * image.height()
+        if pixels > 2560 * 1440:
+            ratio = math.sqrt(2560 * 1440 / pixels)
+            image = image.scaled(max(1, int(image.width() * ratio)),
+                                 max(1, int(image.height() * ratio)),
+                                 Qt.KeepAspectRatio, Qt.FastTransformation)
         with self._lock:
             if self._closed or self._suspended or (generation is not None and generation != self._generation):
                 return False
@@ -223,6 +232,7 @@ class PreFlashCache:
             user32 = ctypes.WinDLL('user32', use_last_error=True)
             user32.GetForegroundWindow.argtypes = []
             user32.GetForegroundWindow.restype = wintypes.HWND
+            inactive_since = None
             while True:
                 with self._lock:
                     if self._closed:
@@ -232,12 +242,16 @@ class PreFlashCache:
                     generation = self._generation
                     capture_after = self._capture_after
                 if not active:
-                    if not self._enabled and source is not None:
+                    if inactive_since is None:
+                        inactive_since = time.perf_counter()
+                    if source is not None and (not self._enabled or
+                            (context is None and time.perf_counter() - inactive_since >= .5)):
                         source.close()
                         source = None
                     self._wake.wait(0.1)
                     self._wake.clear()
                     continue
+                inactive_since = None
                 hwnd, geometry = context
                 if time.perf_counter() < capture_after:
                     self._wake.wait(min(self._interval, capture_after - time.perf_counter()))

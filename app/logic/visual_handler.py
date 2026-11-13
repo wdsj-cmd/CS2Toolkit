@@ -48,6 +48,7 @@ class OverlayWindow(QWidget):
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.game_window = GameWindowTracker()
         self._game_focused = False
+        self._last_game_geometry = None
         self._preview_active = False
         self.background_cache = PreFlashCache()
         self.flash_freeze_background_enabled = True
@@ -178,19 +179,22 @@ class OverlayWindow(QWidget):
         geometry = self.game_window.client_geometry(hwnd) if hwnd else None
         self.background_cache.set_context(hwnd, geometry, focused)
         self._sync_flash_visibility()
-        if not focused and not self._preview_active:
-            if self.windowOpacity() > 0.0:
-                self.setWindowOpacity(0.0)
-        else:
-            if self.windowOpacity() < 1.0:
-                self.setWindowOpacity(1.0)
+        self._sync_media_visibility()
+
+    def _sync_media_visibility(self):
+        has_content = any(not widget.isHidden() for widget in (
+            self.death_label, self.video_widget, self.kill_icon_label, self.kill_video_widget))
+        opacity = 1.0 if has_content and (self._game_focused or self._preview_active) else 0.0
+        if self.windowOpacity() != opacity:
+            self.setWindowOpacity(opacity)
 
     def _update_geometry_to_game(self):
         if not self._preview_active:
             geometry = self.game_window.client_geometry(self.game_window.find())
-            if geometry:
+            if geometry and geometry != self._last_game_geometry:
                 self.game_window.place_overlay(self.winId(), geometry)
                 self.game_window.place_overlay(self.flash_label.winId(), geometry)
+                self._last_game_geometry = geometry
         self._layout_media()
 
     def _sync_flash_visibility(self, *_):
@@ -375,6 +379,7 @@ class OverlayWindow(QWidget):
                 self._frozen_background = self.screen().grabWindow(0).toImage()
             self.background_cache.freeze()
         self._preview_active = True
+        self._last_game_geometry = None
         self.setGeometry(self.screen().geometry())
         self.flash_label.setGeometry(self.geometry())
         self._layout_media()
@@ -468,6 +473,7 @@ class OverlayWindow(QWidget):
         else:
             self._update_label_pixmap(self.death_label, self.death_media_path, self.death_scale_mode)
             self.death_label.show()
+        self._sync_media_visibility()
 
     def hide_death(self):
         self.death_label.hide()
@@ -526,6 +532,7 @@ class OverlayWindow(QWidget):
 
         # 显示3秒后触发淡出
         self.kill_icon_timer.start(3000)
+        self._sync_media_visibility()
 
     def hide_kill_icon(self):
         self.kill_icon_timer.stop()
@@ -549,7 +556,7 @@ class OverlayWindow(QWidget):
         self._check_hide()
 
     def _check_hide(self):
-        pass # 我们现在保持窗口常驻以消除延迟，所以不再隐藏窗口
+        self._sync_media_visibility()
 
 
 
