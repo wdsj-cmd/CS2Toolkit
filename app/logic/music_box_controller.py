@@ -1,6 +1,7 @@
 """Bridge the shared GSI stream, kit storage and the dedicated Qt music player."""
 import random
 import time
+import math
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
@@ -10,7 +11,7 @@ from .music_box_player import MusicBoxPlayer
 from .music_bomb_visual import BombVisualMonitor
 
 DEFAULT_SETTINGS = {'enabled': False, 'volume': 50, 'selected_kit': '',
-                    'estimate_timers': True, 'bomb_seconds': 40, 'round_seconds': 115, 'c4_warning_lead_ms': 500,
+                    'estimate_timers': True, 'bomb_seconds': 40, 'c4_warning_lead_ms': 500,
                     'gsi_plant_delay_ms': 0}
 
 
@@ -20,6 +21,7 @@ class MusicBoxController(QObject):
     error = Signal(str)
     diagnostic = Signal(str, dict)
     visual_status_changed = Signal(str)
+    round_time_changed = Signal(object)
 
     def __init__(self, config_manager, parent=None, player=None):
         super().__init__(parent)
@@ -29,14 +31,14 @@ class MusicBoxController(QObject):
         saved = config_manager.get('music_box', {})
         if isinstance(saved, dict):
             self.settings.update({key: saved[key] for key in DEFAULT_SETTINGS if key in saved})
-        for key, low, high in (('volume', 0, 100), ('bomb_seconds', 11, 180), ('round_seconds', 11, 3600),
+        for key, low, high in (('volume', 0, 100), ('bomb_seconds', 11, 180),
                                ('c4_warning_lead_ms', 0, 2000), ('gsi_plant_delay_ms', 0, 3000)):
             try:
                 self.settings[key] = max(low, min(high, int(self.settings[key])))
             except (TypeError, ValueError, OverflowError):
                 self.settings[key] = DEFAULT_SETTINGS[key]
         self.engine = MusicEventEngine(estimate_timers=self.settings['estimate_timers'],
-                                       bomb_seconds=self.settings['bomb_seconds'], round_seconds=self.settings['round_seconds'],
+                                       bomb_seconds=self.settings['bomb_seconds'],
                                        warning_lead_ms=self.settings['c4_warning_lead_ms'],
                                        gsi_plant_delay_ms=self.settings['gsi_plant_delay_ms'])
         self.player = player or MusicBoxPlayer(self)
@@ -54,6 +56,7 @@ class MusicBoxController(QObject):
         self.previewing = False
         self.status = '未启用，准备好音乐切片后即可配置'
         self._last_gsi = None
+        self.round_seconds_remaining = None
         self._closed = False
         self._team_menu_open = False
         self._team_cue = self._team_return_choice = None
@@ -200,14 +203,12 @@ class MusicBoxController(QObject):
         self.player.set_volume(self.settings['volume'])
         self._queue_save()
 
-    def set_timing(self, estimate, bomb_seconds, round_seconds):
-        self.settings.update(estimate_timers=bool(estimate), bomb_seconds=int(bomb_seconds), round_seconds=int(round_seconds))
+    def set_timing(self, estimate, bomb_seconds, round_seconds=None):
+        # The optional legacy round argument is ignored; only game time counts.
+        self.settings.update(estimate_timers=bool(estimate), bomb_seconds=int(bomb_seconds))
         self.engine.estimate_timers = bool(estimate)
         self.engine.bomb_seconds = int(bomb_seconds)
-        self.engine.round_seconds = int(round_seconds)
         # Settings apply to the next observed phase, not an arbitrary point in it.
-        if not estimate and self.engine.round_estimated:
-            self.engine.round_deadline = None
         if not estimate and self.engine.bomb_estimated:
             self.engine.bomb_deadline = None
         self._queue_save()
@@ -223,16 +224,17 @@ class MusicBoxController(QObject):
         first = self._last_gsi is None
         self._last_gsi = time.monotonic()
         cue = self.engine.process(state)
+        self._update_round_time()
         self._update_visual_context(state)
         player = object_node(state.get('player'))
         map_info = object_node(state.get('map'))
         team_state = (self.engine.map_name, map_info.get('phase'), self.engine.phase,
                       player.get('activity'), player.get('team'), self.engine.selecting_team,
-                      self.engine.team_selection_done)
+                      self.engine.team_selection_done, map_info.get('mode'))
         if team_state != self._team_state_signature:
             self._team_state_signature = team_state
             self.diagnostic.emit('music_team_state', dict(zip(
-                ('map', 'map_phase', 'round_phase', 'activity', 'team', 'selecting', 'selection_done'), team_state)))
+                ('map', 'map_phase', 'round_phase', 'activity', 'team', 'selecting', 'selection_done', 'mode'), team_state)))
         if self.settings['gsi_plant_delay_ms'] != self.engine.gsi_plant_delay_ms:
             self.settings['gsi_plant_delay_ms'] = self.engine.gsi_plant_delay_ms
             self._queue_save()
@@ -265,6 +267,16 @@ class MusicBoxController(QObject):
             self._play_cue(cue)
         elif first and self.enabled and not self.previewing:
             self._status('游戏数据已连接，等待音乐事件')
+
+    def _update_round_time(self):
+        now = time.monotonic()
+        deadline = self.engine.round_deadline
+        remaining = (max(0, math.ceil(deadline - now))
+                     if deadline is not None and self.engine.phase == 'live' and not self.engine.round_paused
+                     and self._last_gsi is not None and now - self._last_gsi <= 3 else None)
+        if remaining != self.round_seconds_remaining:
+            self.round_seconds_remaining = remaining
+            self.round_time_changed.emit(remaining)
 
     def _update_tick_rate(self):
         deadline = self.engine.bomb_deadline if self.engine.bomb_state in ('planted', 'defusing') else self.engine.round_deadline
@@ -394,6 +406,7 @@ class MusicBoxController(QObject):
         self._status('已停止，新的游戏事件或试听可再次开始播放')
 
     def _tick(self):
+        self._update_round_time()
         self._update_tick_rate()
         if self._last_gsi is not None and time.monotonic() - self._last_gsi > 5:
             self.engine.reset()

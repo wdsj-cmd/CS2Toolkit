@@ -238,7 +238,7 @@ class MusicBoxPage(ScrollArea):
         timing_layout = QVBoxLayout(timing)
         timing_layout.setContentsMargins(16, 12, 16, 12)
         row = QHBoxLayout()
-        label = BodyLabel('缺少 GSI 倒计时时允许估算', timing)
+        label = BodyLabel('缺少 C4 倒计时时允许估算', timing)
         row.addWidget(label, 1)
         self.estimate = SwitchButton(timing)
         self.estimate.setOnText('开')
@@ -252,11 +252,9 @@ class MusicBoxPage(ScrollArea):
         self.bomb_seconds.setSuffix(' 秒')
         row.addWidget(self.bomb_seconds)
         row.addSpacing(8)
-        row.addWidget(CaptionLabel('回合总计时', timing))
-        self.round_seconds = SpinBox(timing)
-        self.round_seconds.setRange(11, 3600)
-        self.round_seconds.setSuffix(' 秒')
-        row.addWidget(self.round_seconds)
+        row.addWidget(CaptionLabel('回合实际剩余', timing))
+        self.round_remaining = CaptionLabel('', timing)
+        row.addWidget(self.round_remaining)
         timing_layout.addLayout(row)
         row = QHBoxLayout()
         row.addWidget(CaptionLabel('C4 十秒提示提前补偿', timing), 1)
@@ -266,7 +264,7 @@ class MusicBoxPage(ScrollArea):
         self.warning_lead.setSuffix(' 毫秒')
         row.addWidget(self.warning_lead)
         timing_layout.addLayout(row)
-        hint = CaptionLabel('优先使用游戏倒计时；估算时长从下次回合或安包生效。提示仍偏晚可调大补偿，偏早则调小。', timing)
+        hint = CaptionLabel('回合十秒音乐仅跟随游戏实际剩余时间。C4 估算时长从下次安包生效；提示偏晚可调大补偿，偏早则调小。', timing)
         hint.setWordWrap(True)
         timing_layout.addWidget(hint)
         self.layout.addWidget(timing)
@@ -311,7 +309,7 @@ class MusicBoxPage(ScrollArea):
             self.layout.addWidget(card)
 
         note = CaptionLabel('首次使用请在设置中重新生成 GSI 配置并重启 CS2。若与游戏原音乐重叠，可在游戏中调低对应音乐音量。\n'
-                            '中途接入的回合不估算已有计时；安包者信息缺失时使用通用切片。', self)
+                            '游戏未提供回合时间时不猜算；安包者信息缺失时使用通用切片。', self)
         note.setWordWrap(True)
         self.layout.addWidget(note)
         reference = BodyLabel('<a href="https://github.com/TYFALY/CS-Jukebox-V2">音乐事件设计参考 CS-Jukebox-V2</a>', self)
@@ -321,7 +319,7 @@ class MusicBoxPage(ScrollArea):
         self.volume.valueChanged.connect(self._volume_changed)
         self.estimate.checkedChanged.connect(self._timing_changed)
         self.bomb_seconds.valueChanged.connect(self._timing_changed)
-        self.round_seconds.valueChanged.connect(self._timing_changed)
+        controller.round_time_changed.connect(self._show_round_time)
         self.warning_lead.valueChanged.connect(controller.set_warning_lead)
         self.visual_reset.clicked.connect(controller.reset_visual_template)
         controller.visual_status_changed.connect(self.visual_status.setText)
@@ -345,7 +343,8 @@ class MusicBoxPage(ScrollArea):
         self.volume.setValue(int(self.controller.settings['volume']))
         self.volume.blockSignals(False)
         self.volume_value.setText(f'{self.volume.value()}%')
-        for widget, key in ((self.estimate, 'estimate_timers'), (self.bomb_seconds, 'bomb_seconds'), (self.round_seconds, 'round_seconds'), (self.warning_lead, 'c4_warning_lead_ms')):
+        self._show_round_time(self.controller.round_seconds_remaining)
+        for widget, key in ((self.estimate, 'estimate_timers'), (self.bomb_seconds, 'bomb_seconds'), (self.warning_lead, 'c4_warning_lead_ms')):
             widget.blockSignals(True)
             if widget is self.estimate:
                 widget.setChecked(bool(self.controller.settings[key]))
@@ -381,7 +380,10 @@ class MusicBoxPage(ScrollArea):
         self.volume_value.setText(f'{value}%')
 
     def _timing_changed(self, *_):
-        self.controller.set_timing(self.estimate.isChecked(), self.bomb_seconds.value(), self.round_seconds.value())
+        self.controller.set_timing(self.estimate.isChecked(), self.bomb_seconds.value())
+
+    def _show_round_time(self, seconds):
+        self.round_remaining.setText('游戏未提供' if seconds is None else f'{seconds // 60:02d}:{seconds % 60:02d}')
 
     def _select(self, index):
         if index >= 0:

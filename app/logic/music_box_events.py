@@ -25,7 +25,7 @@ SLOTS = (
     EventSlot('freeze_time', '准备阶段', '每回合购买与准备阶段，参考 15 秒', 15, True, 'freezeSong'),
     EventSlot('round_start', '回合开始', '准备结束后播放，参考 5 秒', 5, False, 'startSong'),
     EventSlot('bomb_planted', 'C4 已安放', '安包后播放，参考 30 秒', 30, False, 'bombSong'),
-    EventSlot('round_ten_seconds', '回合剩余十秒', '游戏倒计时优先，缺失时可按设置估算', 10, False, 'roundTenSecSong'),
+    EventSlot('round_ten_seconds', '回合剩余十秒', '仅跟随游戏实际剩余时间，缺失时不触发', 10, False, 'roundTenSecSong'),
     EventSlot('bomb_ten_seconds', 'C4 十秒警告 · 通用', '安包者未知或专用切片未设置时使用', 10, False, 'bombTenSecSong'),
     EventSlot('bomb_ten_seconds_self', 'C4 十秒警告 · 自己安放', '确认由自己安放时使用，否则使用通用切片', 10),
     EventSlot('bomb_ten_seconds_other', 'C4 十秒警告 · 其他人安放', '确认由其他玩家安放时使用，否则使用通用切片', 10),
@@ -306,9 +306,6 @@ class MusicEventEngine:
                 self.round_result = ''
             elif phase == 'live' and self.phase == 'freezetime':
                 candidates.append('round_start')
-                if self.estimate_timers:
-                    self.round_deadline = now + self.round_seconds
-                    self.round_estimated = True
             if planted and self.bomb_state not in ('planted', 'defusing'):
                 candidates.append('bomb_planted')
                 self.ten_played.discard('bomb_ten_seconds')
@@ -347,9 +344,8 @@ class MusicEventEngine:
             self.round_paused = countdown.get('phase') in ('paused', 'timeout_t', 'timeout_ct')
             if self.round_paused and self.paused_at is None:
                 self.paused_at = now
+                self.round_deadline = None
             elif not self.round_paused and self.paused_at is not None:
-                if self.round_estimated and self.round_deadline is not None:
-                    self.round_deadline += now - self.paused_at
                 self.paused_at = None
             remaining = number(countdown.get('phase_ends_in'))
             if remaining is not None and remaining >= 0:
