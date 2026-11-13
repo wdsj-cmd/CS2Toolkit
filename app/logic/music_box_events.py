@@ -251,7 +251,9 @@ class MusicEventEngine:
                 warning = self._warning(now)
                 if warning:
                     candidates.append(warning)
-        self.activity = activity
+        # Esc can report "menu" while the match is still active. Remember only
+        # a real main-menu visit, so the next packet cannot stop match music.
+        self.activity = 'playing' if activity == 'menu' and not entered_menu else activity
         if candidates:
             return self._emit(max(candidates, key=PRIORITY.__getitem__), now)
         if bomb_state in ('defused', 'exploded') and self.current_cue and self.current_cue.event.startswith('bomb_'):
