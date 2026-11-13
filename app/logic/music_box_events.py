@@ -5,6 +5,7 @@ https://github.com/TYFALY/CS-Jukebox-V2
 """
 from dataclasses import dataclass
 import math
+from statistics import median
 import time
 
 
@@ -58,12 +59,15 @@ class MusicCue:
 
 
 class MusicEventEngine:
-    def __init__(self, clock=time.monotonic, estimate_timers=True, bomb_seconds=40, round_seconds=115, warning_lead_ms=0):
+    def __init__(self, clock=time.monotonic, estimate_timers=True, bomb_seconds=40, round_seconds=115, warning_lead_ms=0,
+                 gsi_plant_delay_ms=0):
         self.clock = clock
         self.estimate_timers = estimate_timers
         self.bomb_seconds = bomb_seconds
         self.round_seconds = round_seconds
         self.warning_lead_ms = warning_lead_ms
+        self.gsi_plant_delay_ms = max(0, min(3000, int(gsi_plant_delay_ms)))
+        self._plant_delays = [self.gsi_plant_delay_ms] * 3 if self.gsi_plant_delay_ms else []
         self.reset()
 
     def reset(self):
@@ -83,6 +87,10 @@ class MusicEventEngine:
         self._local_c4_loss = None
         self.local_plant_time = None
         self.server_bomb_planted = False
+        self.server_plant_received_at = None
+        self._delay_sampled = False
+        self.plant_signal_source = ''
+        self.bomb_timer_compensation_ms = 0
         self.plant_evidence = {}
         self.round_result = ''
         self.round_paused = False
@@ -116,6 +124,10 @@ class MusicEventEngine:
             self.planter_source = ''
             self._local_inventory = self._local_c4_loss = None
             self.local_plant_time = None
+            self.bomb_state = ''
+            self.server_plant_received_at = None
+            self._delay_sampled = False
+            self.bomb_timer_compensation_ms = 0
             if object_node(state.get('round')).get('phase') != 'over':
                 self.round_result = ''
         self.last_update = now
@@ -138,12 +150,35 @@ class MusicEventEngine:
         raw_bomb_state = bomb.get('state', '')
         round_bomb_state = round_info.get('bomb', '')
         bomb_state = raw_bomb_state or round_bomb_state
+        self.plant_signal_source = 'bomb.state' if raw_bomb_state in ('planted', 'defusing') else ''
         # round.bomb can announce a completed plant before the detailed bomb
         # node catches up. Do not wait for that second update to start music.
         if round_bomb_state in ('planted', 'defused', 'exploded') and raw_bomb_state in ('', 'carried', 'dropped', 'planting'):
             bomb_state = round_bomb_state
+            self.plant_signal_source = 'round.bomb'
+        countdown = object_node(state.get('phase_countdowns'))
+        remaining = number(countdown.get('phase_ends_in'))
+        terminal = bomb_state in ('defused', 'exploded') or phase in ('freezetime', 'over')
+        # Some GSI sources publish the bomb phase before round.bomb or bomb.state.
+        # A planting countdown reaching zero alone is not proof of completion.
+        if not terminal and remaining is not None:
+            if countdown.get('phase') == 'bomb' and 0 < remaining <= 180:
+                bomb_state = 'planted' if raw_bomb_state != 'defusing' else 'defusing'
+                self.plant_signal_source = 'phase_countdowns'
+            elif countdown.get('phase') == 'defuse' and 0 < remaining <= 10:
+                bomb_state = 'defusing'
+                self.plant_signal_source = 'phase_countdowns'
         planted = bomb_state in ('planted', 'defusing')
         self.server_bomb_planted = planted
+        if planted and not terminal and self.server_plant_received_at is None:
+            self.server_plant_received_at = now
+        elif terminal:
+            self.server_plant_received_at = None
+        elif self.server_plant_received_at is not None:
+            # A completed plant cannot turn back into a carried/dropped bomb.
+            # Retain confirmation through lagging or temporarily absent fields.
+            bomb_state, planted = 'planted', True
+            self.plant_signal_source = 'confirmed_previous'
         # The identity on a planting packet is the planter. The identity on a
         # defusing packet is the defuser, and must never replace the planter.
         if raw_bomb_state == 'planting' and self.bomb_state not in ('planted', 'defusing'):
@@ -168,6 +203,15 @@ class MusicEventEngine:
         # completed local plant is proven, retain it through delayed bomb data.
         if can_infer and self.planter_source == 'inventory_reward' and self.local_plant_time is not None:
             bomb_state, planted = 'planted', True
+            if not self.server_bomb_planted:
+                self.plant_signal_source = 'local_inventory'
+        if self.server_plant_received_at is not None and self.local_plant_time is not None and not self._delay_sampled:
+            self._delay_sampled = True
+            delay_ms = (self.server_plant_received_at - self.local_plant_time) * 1000
+            if 0 <= delay_ms <= 3000:
+                self._plant_delays.append(delay_ms)
+                self._plant_delays = self._plant_delays[-9:]
+                self.gsi_plant_delay_ms = round(median(self._plant_delays))
         candidates = []
         entered_menu = activity == 'menu' and not phase and map_info.get('phase') not in ('live', 'warmup')
         if entered_menu:
@@ -181,6 +225,7 @@ class MusicEventEngine:
             self.planter_source = ''
             self._local_inventory = self._local_c4_loss = None
             self.local_plant_time = None
+            self.server_plant_received_at = None
             self.ten_played.clear()
         else:
             if self.activity == 'menu':
@@ -203,9 +248,16 @@ class MusicEventEngine:
                 candidates.append('bomb_planted')
                 self.ten_played.discard('bomb_ten_seconds')
                 # Estimate only a newly observed plant, never a mid-round join.
-                if self.estimate_timers and (self.phase == 'live' or self.local_plant_time is not None):
-                    self.bomb_deadline = (self.local_plant_time if self.local_plant_time is not None else now) + self.bomb_seconds
+                if (self.estimate_timers and (self.phase == 'live' or self.local_plant_time is not None)
+                        and not (bomb_state == 'defusing' and self.server_plant_received_at == now)):
+                    own_plant = self.planter_id and self.planter_id == self.local_id
+                    self.bomb_timer_compensation_ms = self.gsi_plant_delay_ms if not own_plant else 0
+                    anchor = self.local_plant_time if self.local_plant_time is not None else now - self.bomb_timer_compensation_ms / 1000
+                    self.bomb_deadline = anchor + self.bomb_seconds
                     self.bomb_estimated = True
+            if self.bomb_estimated and self.local_plant_time is not None:
+                self.bomb_deadline = self.local_plant_time + self.bomb_seconds
+                self.bomb_timer_compensation_ms = 0
             if (health == 0 and self.health is not None and self.health > 0
                     and phase == 'live' and not planted):
                 candidates.append('death')
@@ -241,10 +293,12 @@ class MusicEventEngine:
                 elif countdown.get('phase') == 'bomb' and planted:
                     self.bomb_deadline = now + remaining
                     self.bomb_estimated = False
+                    self.bomb_timer_compensation_ms = 0
             bomb_remaining = number(bomb.get('countdown'))
             if raw_bomb_state == 'planted' and bomb_remaining is not None and bomb_remaining >= 0:
                 self.bomb_deadline = now + bomb_remaining
                 self.bomb_estimated = False
+                self.bomb_timer_compensation_ms = 0
             if phase in ('freezetime', 'over') or bomb_state in ('defused', 'exploded'):
                 self.round_deadline = self.bomb_deadline = None
             if self.phase == 'live' and not self.round_paused:

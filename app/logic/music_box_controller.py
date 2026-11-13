@@ -4,12 +4,13 @@ import time
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from .music_box_events import MusicEventEngine, SLOT_MAP
+from .music_box_events import MusicEventEngine, SLOT_MAP, object_node, number
 from .music_box_library import MusicKitLibrary, event_options, validate_clip
 from .music_box_player import MusicBoxPlayer
 
 DEFAULT_SETTINGS = {'enabled': False, 'volume': 50, 'selected_kit': '',
-                    'estimate_timers': True, 'bomb_seconds': 40, 'round_seconds': 115, 'c4_warning_lead_ms': 500}
+                    'estimate_timers': True, 'bomb_seconds': 40, 'round_seconds': 115, 'c4_warning_lead_ms': 500,
+                    'gsi_plant_delay_ms': 0}
 
 
 class MusicBoxController(QObject):
@@ -26,14 +27,16 @@ class MusicBoxController(QObject):
         saved = config_manager.get('music_box', {})
         if isinstance(saved, dict):
             self.settings.update({key: saved[key] for key in DEFAULT_SETTINGS if key in saved})
-        for key, low, high in (('volume', 0, 100), ('bomb_seconds', 11, 180), ('round_seconds', 11, 3600), ('c4_warning_lead_ms', 0, 2000)):
+        for key, low, high in (('volume', 0, 100), ('bomb_seconds', 11, 180), ('round_seconds', 11, 3600),
+                               ('c4_warning_lead_ms', 0, 2000), ('gsi_plant_delay_ms', 0, 3000)):
             try:
                 self.settings[key] = max(low, min(high, int(self.settings[key])))
             except (TypeError, ValueError, OverflowError):
                 self.settings[key] = DEFAULT_SETTINGS[key]
         self.engine = MusicEventEngine(estimate_timers=self.settings['estimate_timers'],
                                        bomb_seconds=self.settings['bomb_seconds'], round_seconds=self.settings['round_seconds'],
-                                       warning_lead_ms=self.settings['c4_warning_lead_ms'])
+                                       warning_lead_ms=self.settings['c4_warning_lead_ms'],
+                                       gsi_plant_delay_ms=self.settings['gsi_plant_delay_ms'])
         self.player = player or MusicBoxPlayer(self)
         self.player.set_volume(self.settings['volume'])
         self.player.failed.connect(self._failed)
@@ -43,6 +46,7 @@ class MusicBoxController(QObject):
         self._audio_request = None
         self._cue_choice = None
         self._bomb_signature = None
+        self._bomb_input_signature = None
         self.kit = None
         self.previewing = False
         self.status = '未启用，准备好音乐切片后即可配置'
@@ -135,13 +139,29 @@ class MusicBoxController(QObject):
         first = self._last_gsi is None
         self._last_gsi = time.monotonic()
         cue = self.engine.process(state)
+        if self.settings['gsi_plant_delay_ms'] != self.engine.gsi_plant_delay_ms:
+            self.settings['gsi_plant_delay_ms'] = self.engine.gsi_plant_delay_ms
+            self._queue_save()
+        round_info, bomb, countdown = (object_node(state.get(key)) for key in ('round', 'bomb', 'phase_countdowns'))
+        inputs = tuple(value if isinstance(value, str) else None for value in (
+            round_info.get('phase'), round_info.get('bomb'), bomb.get('state'), countdown.get('phase')))
+        if inputs != self._bomb_input_signature:
+            self._bomb_input_signature = inputs
+            self.diagnostic.emit('music_bomb_inputs', {
+                'round_phase': inputs[0], 'round_bomb': inputs[1], 'bomb_state': inputs[2], 'countdown_phase': inputs[3],
+                'phase_seconds': number(countdown.get('phase_ends_in')), 'bomb_seconds': number(bomb.get('countdown'))})
         received = state.get('_toolkit_received_at', self._last_gsi)
         queue_ms = max(0, (self._last_gsi - received) * 1000) if isinstance(received, (int, float)) else None
         relation = ('self' if self.engine.planter_id == self.engine.local_id else 'other') if self.engine.planter_id else 'unknown'
-        signature = (self.engine.bomb_state, relation, self.engine.planter_source, self.engine.server_bomb_planted)
+        signature = (self.engine.bomb_state, relation, self.engine.planter_source, self.engine.server_bomb_planted,
+                     self.engine.plant_signal_source, self.engine.bomb_estimated)
         if signature != self._bomb_signature and self.engine.bomb_state:
             self.diagnostic.emit('music_bomb_state', {'state': self.engine.bomb_state, 'owner': relation,
                 'server_plant_seen': self.engine.server_bomb_planted,
+                'signal_source': self.engine.plant_signal_source,
+                'timer_estimated': self.engine.bomb_estimated,
+                'timer_compensation_ms': self.engine.bomb_timer_compensation_ms,
+                'gsi_plant_delay_ms': self.engine.gsi_plant_delay_ms,
                 'owner_source': self.engine.planter_source or 'unavailable', 'ui_queue_ms': queue_ms,
                 'local_anchor_age_ms': round((time.monotonic() - self.engine.local_plant_time) * 1000, 1) if self.engine.local_plant_time is not None else None,
                 'evidence': dict(self.engine.plant_evidence)})
