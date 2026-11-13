@@ -21,7 +21,7 @@ class EventSlot:
 
 SLOTS = (
     EventSlot('main_menu', '主菜单', '大厅或主菜单，适合循环音乐', 0, True, 'mainMenuSong'),
-    EventSlot('team_select', '选择队伍', '进入地图尚未加入 T/CT 时播放，选好队伍后结束', 0, True),
+    EventSlot('team_select', '选择队伍', '进入地图选队或按 M 打开队伍菜单时播放，关闭后恢复', 0, True),
     EventSlot('freeze_time', '准备阶段', '每回合购买与准备阶段，参考 15 秒', 15, True, 'freezeSong'),
     EventSlot('round_start', '回合开始', '准备结束后播放，参考 5 秒', 5, False, 'startSong'),
     EventSlot('bomb_planted', 'C4 已安放', '安包后播放，参考 30 秒', 30, False, 'bombSong'),

@@ -4,14 +4,14 @@ import time
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from .music_box_events import MusicEventEngine, SLOT_MAP, object_node, number
+from .music_box_events import MusicEventEngine, MusicCue, SLOT_MAP, object_node, number
 from .music_box_library import MusicKitLibrary, event_options, validate_clip
 from .music_box_player import MusicBoxPlayer
 from .music_bomb_visual import BombVisualMonitor
 
 DEFAULT_SETTINGS = {'enabled': False, 'volume': 50, 'selected_kit': '',
                     'estimate_timers': True, 'bomb_seconds': 40, 'round_seconds': 115, 'c4_warning_lead_ms': 500,
-                    'gsi_plant_delay_ms': 0, 'c4_visual_enabled': False}
+                    'gsi_plant_delay_ms': 0}
 
 
 class MusicBoxController(QObject):
@@ -29,7 +29,6 @@ class MusicBoxController(QObject):
         saved = config_manager.get('music_box', {})
         if isinstance(saved, dict):
             self.settings.update({key: saved[key] for key in DEFAULT_SETTINGS if key in saved})
-        self.settings['c4_visual_enabled'] = self.settings['c4_visual_enabled'] is True
         for key, low, high in (('volume', 0, 100), ('bomb_seconds', 11, 180), ('round_seconds', 11, 3600),
                                ('c4_warning_lead_ms', 0, 2000), ('gsi_plant_delay_ms', 0, 3000)):
             try:
@@ -55,9 +54,12 @@ class MusicBoxController(QObject):
         self.status = '未启用，准备好音乐切片后即可配置'
         self._last_gsi = None
         self._closed = False
+        self._team_menu_open = False
+        self._team_cue = self._team_return_choice = None
         self.visual_monitor = BombVisualMonitor(config_manager.work_dir, self)
         self.visual_monitor.detected.connect(self._on_visual_bomb)
         self.visual_monitor.status_changed.connect(self._visual_status)
+        self.visual_monitor.team_menu_changed.connect(self._on_team_menu)
         self.save_timer = QTimer(self)
         self.save_timer.setSingleShot(True)
         self.save_timer.timeout.connect(self._save)
@@ -102,25 +104,26 @@ class MusicBoxController(QObject):
         self.kit = self.library.load(kit_id) if kit_id else None
         self.settings['selected_kit'] = kit_id
         self._queue_save()
-        if self.enabled and self.engine.current_cue:
-            self._play_cue(self.engine.current_cue, resume=True)
+        if self.enabled:
+            self._resume_music()
         self.changed.emit()
 
     def set_enabled(self, enabled):
         self.settings['enabled'] = bool(enabled)
         self._queue_save()
         if not enabled:
+            self._team_menu_open = False
+            self._team_cue = self._team_return_choice = None
             self.stop()
             self._status('创意音乐盒已关闭')
         else:
             self._status('已启用，等待游戏事件' if self.kit else '请先创建或导入一个音乐盒')
-            if self.engine.current_cue:
-                self._play_cue(self.engine.current_cue, resume=True)
+            self._resume_music()
         self._sync_visual_monitor()
         self.changed.emit()
 
     def _sync_visual_monitor(self):
-        if self.enabled and self.settings['c4_visual_enabled'] and not self._closed:
+        if self.enabled and not self._closed:
             self.visual_monitor.start()
         else:
             self.visual_monitor.stop()
@@ -129,11 +132,33 @@ class MusicBoxController(QObject):
         self.visual_status_changed.emit(text)
         self.diagnostic.emit('music_bomb_visual_status', {'status': text})
 
-    def set_visual_enabled(self, enabled):
-        self.settings['c4_visual_enabled'] = bool(enabled)
-        self._queue_save()
-        self._sync_visual_monitor()
-        self.changed.emit()
+    def _resume_music(self):
+        cue = self._team_cue if self._team_menu_open else self.engine.current_cue
+        if cue:
+            self._play_cue(cue, resume=True)
+        else:
+            self.player.stop()
+
+    def _on_team_menu(self, visible):
+        if self._closed or visible == self._team_menu_open:
+            return
+        self._team_menu_open = visible
+        already_playing = False
+        if visible:
+            self._team_return_choice = self._cue_choice
+            current = self.engine.current_cue
+            already_playing = bool(current and current.event == 'team_select' and self._cue_choice)
+            self._team_cue = current if current and current.event == 'team_select' else MusicCue('team_select', time.monotonic())
+        else:
+            self._cue_choice = self._team_return_choice
+            self._team_cue = self._team_return_choice = None
+        self.diagnostic.emit('music_team_menu', {'visible': visible})
+        if self.enabled and not self.previewing and not already_playing:
+            if not visible and self.engine.current_cue and self.engine.current_cue.event == 'team_select':
+                self.player.stop()
+                self._status('队伍菜单已关闭，等待游戏事件')
+            else:
+                self._resume_music()
 
     def reset_visual_template(self):
         try:
@@ -154,14 +179,14 @@ class MusicBoxController(QObject):
             blocked=bool(flashed and flashed > 0))
 
     def _on_visual_bomb(self, observed_at):
-        if self._closed or not self.enabled or not self.settings['c4_visual_enabled']:
+        if self._closed or not self.enabled:
             return
         cue = self.engine.confirm_bomb_visual(observed_at)
         if cue:
             self.diagnostic.emit('music_bomb_visual', {'capture_to_ui_ms': round((time.monotonic() - observed_at) * 1000, 1)})
             self._update_visual_context()
             self._update_tick_rate()
-            if not self.previewing:
+            if not self.previewing and not self._team_menu_open:
                 self._play_cue(cue)
 
     def set_volume(self, value):
@@ -221,7 +246,7 @@ class MusicBoxController(QObject):
                 'evidence': dict(self.engine.plant_evidence)})
         self._bomb_signature = signature
         self._update_tick_rate()
-        if cue and self.enabled and not self.previewing:
+        if cue and self.enabled and not self.previewing and not self._team_menu_open:
             self._play_cue(cue)
         elif first and self.enabled and not self.previewing:
             self._status('游戏数据已连接，等待音乐事件')
@@ -324,8 +349,8 @@ class MusicBoxController(QObject):
     def _finished(self):
         if self.previewing:
             self.previewing = False
-            if self.enabled and self.engine.current_cue:
-                self._play_cue(self.engine.current_cue, resume=True)
+            if self.enabled and (self.engine.current_cue or self._team_menu_open):
+                self._resume_music()
                 return
         self._status('播放结束，等待下一个音乐事件')
 
@@ -340,8 +365,8 @@ class MusicBoxController(QObject):
         if self.previewing:
             self.previewing = False
             self.player.stop()
-            if self.enabled and self.engine.current_cue:
-                self._play_cue(self.engine.current_cue, resume=True)
+            if self.enabled and (self.engine.current_cue or self._team_menu_open):
+                self._resume_music()
             else:
                 self._status('试听已结束')
 
@@ -363,7 +388,7 @@ class MusicBoxController(QObject):
             return
         if self.enabled and not self.previewing:
             cue = self.engine.tick()
-            if cue:
+            if cue and not self._team_menu_open:
                 self._play_cue(cue)
 
     def cleanup(self):
