@@ -5,7 +5,7 @@ import time
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from .music_box_events import MusicEventEngine, SLOT_MAP
-from .music_box_library import MusicKitLibrary, validate_clip
+from .music_box_library import MusicKitLibrary, event_options, validate_clip
 from .music_box_player import MusicBoxPlayer
 
 DEFAULT_SETTINGS = {'enabled': False, 'volume': 50, 'selected_kit': '',
@@ -41,6 +41,7 @@ class MusicBoxController(QObject):
         if hasattr(self.player, 'started'):
             self.player.started.connect(self._audio_loaded)
         self._audio_request = None
+        self._cue_choice = None
         self._bomb_signature = None
         self.kit = None
         self.previewing = False
@@ -72,6 +73,7 @@ class MusicBoxController(QObject):
         self.save_timer.start(250)
 
     def reload_library(self):
+        self._cue_choice = None
         kits = self.library.list_kits()
         selected = next((kit for kit in kits if kit['id'] == self.settings['selected_kit']), None)
         if selected is None and kits:
@@ -85,6 +87,7 @@ class MusicBoxController(QObject):
 
     def select_kit(self, kit_id):
         self.stop()
+        self._cue_choice = None
         self.kit = self.library.load(kit_id) if kit_id else None
         self.settings['selected_kit'] = kit_id
         self._queue_save()
@@ -164,25 +167,38 @@ class MusicBoxController(QObject):
                 'load_ms': round((time.monotonic() - started) * 1000, 2),
                 'cue_to_loaded_ms': round((time.monotonic() - received) * 1000, 2)})
 
+    def _choose_clip(self, event, clips):
+        options = event_options(self.kit, event)
+        return dict(random.choice(clips) if options['random'] else clips[options['selected_index']])
+
     def _play_cue(self, cue, resume=False):
         self._audio_request = None
         if cue.event == 'stop':
+            self._cue_choice = None
             self.player.stop()
             self._status('已进入对局，等待下一个音乐事件')
             return
-        clips = self.kit['tracks'].get(cue.event, []) if self.kit else []
+        event = cue.event
+        clips = self.kit['tracks'].get(event, []) if self.kit else []
         used_fallback = False
         if not clips and self.kit:
             fallback = ('bomb_ten_seconds' if cue.event in ('bomb_ten_seconds_self', 'bomb_ten_seconds_other')
                         else self.engine.round_result if cue.event == 'mvp' else '')
-            clips = self.kit['tracks'].get(fallback, [])
+            event = fallback
+            clips = self.kit['tracks'].get(event, [])
             used_fallback = bool(clips)
         if not clips:
             # A phase change must not leave the previous phase's loop playing.
             self.player.stop()
             self._status(SLOT_MAP[cue.event].title + '：尚未设置切片')
             return
-        clip = dict(random.choice(clips))
+        key = (self.kit['id'], cue.event, cue.started, event)
+        if resume and self._cue_choice and self._cue_choice[0] == key:
+            clip = dict(self._cue_choice[1])
+        else:
+            clip = self._choose_clip(event, clips)
+            # Resuming after a preview keeps this event's original selection.
+            self._cue_choice = (key, dict(clip))
         if resume and not clip.get('loop'):
             elapsed = max(0, time.monotonic() - cue.started)
             if clip['duration'] > 0 and elapsed >= clip['duration']:
@@ -216,7 +232,7 @@ class MusicBoxController(QObject):
             if not clips:
                 self._failed('请先为这个事件添加音频切片')
                 return
-            clip = random.choice(clips)
+            clip = self._choose_clip(event, clips)
             path = self.library.resolve(self.kit, clip)
         else:
             clip = validate_clip(clip, event)
