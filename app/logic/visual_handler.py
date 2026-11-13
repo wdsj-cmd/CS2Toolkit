@@ -7,12 +7,15 @@ import subprocess
 import threading
 import time
 from PySide6.QtWidgets import QWidget, QLabel
-from PySide6.QtCore import Qt, QUrl, QTimer, Signal, QObject, QPropertyAnimation, QSize
+from PySide6.QtCore import Qt, QUrl, QTimer, Signal, QObject, QPropertyAnimation, QSize, QCoreApplication
 from PySide6.QtGui import QPixmap, QColor, QMovie, QImage
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from .audio_session_controller import AudioSessionController
 from .game_window import GameWindowTracker
+from .target_media_controller import (TargetMediaController, foreground_media_target,
+                                      default_media_target, activate_media_window)
+from .death_switch_guard import DeathSwitchGuard
 from .flash_background import (PreFlashCache, compose_flash_image,
                                image_has_transparency, flash_image_extensions)
 
@@ -38,7 +41,6 @@ class VisualSignals(QObject):
     open_boss_key_target = Signal(str, str, int)  # target_type, target, delay(ms)
     close_browser = Signal()
     minimize_browser = Signal()
-    pause_media = Signal()
 
 class OverlayWindow(QWidget):
     def __init__(self):
@@ -571,7 +573,18 @@ class VisualHandler(QObject):
         self.signals.open_boss_key_target.connect(self._open_boss_key_target)
         self.signals.close_browser.connect(self._close_browser)
         self.signals.minimize_browser.connect(self._minimize_browser)
-        self.signals.pause_media.connect(self._pause_media)
+        self.target_media = TargetMediaController(foreground_check=lambda: bool(
+            getattr(self, 'visual_master_enabled', False)
+            and getattr(self, 'boss_key_enabled', False)
+            and getattr(self, 'boss_key_action', '') == 'pause'
+            and self.overlay._game_focused))
+        QCoreApplication.instance().aboutToQuit.connect(self.target_media.close)
+        self._boss_key_request = 0
+        self._boss_key_window = None
+        self.death_switch_guard = DeathSwitchGuard()
+        self._boss_key_has_switched = False
+        self._media_was_away = False
+        self.overlay.focus_timer.timeout.connect(self._sync_media_focus)
         self.audio_session_controller = AudioSessionController()
 
         self.is_flashed = False
@@ -686,6 +699,10 @@ class VisualHandler(QObject):
               or activity == 'spectating' or not has_valid_team):
             is_observing = True
         self.last_is_observing = is_observing
+        self.death_switch_guard.update(game_state)
+        if (self._boss_key_triggered and not self._boss_key_has_switched
+                and self.death_switch_guard.decision() == 'skip'):
+            self._cancel_death_switch()
 
         # 1. 闪光弹处理
         if self.flash_enabled and not is_observing:
@@ -715,11 +732,16 @@ class VisualHandler(QObject):
                 self.signals.show_death.emit()
 
             if self.boss_key_enabled:
-                self._boss_key_triggered = True
-                self._boss_key_restore_pending = True
-                self.signals.open_boss_key_target.emit(self.boss_key_target_type, self.boss_key_target, self.boss_key_delay * 1000)
+                self.death_switch_guard.start(game_state)
+                self._boss_key_has_switched = False
+                if self.death_switch_guard.decision() == 'skip':
+                    self._cancel_death_switch()
+                else:
+                    self._boss_key_triggered = True
+                    self._boss_key_restore_pending = True
+                    self.signals.open_boss_key_target.emit(self.boss_key_target_type, self.boss_key_target, self.boss_key_delay * 1000)
 
-        elif health > 0 and self.is_dead:
+        elif not is_observing and health > 0 and self.is_dead:
             self.is_dead = False
             if self.death_media_enabled:
                 self.signals.hide_death.emit()
@@ -816,6 +838,10 @@ class VisualHandler(QObject):
         return False
 
     def _restore_boss_key_context(self):
+        self._media_was_away = False
+        self.death_switch_guard.reset()
+        self._boss_key_has_switched = False
+        self._boss_key_request += 1
         self._boss_key_triggered = False
         self._boss_key_restore_pending = False
 
@@ -823,9 +849,7 @@ class VisualHandler(QObject):
             self.signals.close_browser.emit()
             self._browser_opened = False
         elif self.boss_key_action == 'pause':
-            is_playing = self._is_audio_playing()
-            if self._browser_muted and is_playing:
-                self.signals.pause_media.emit()
+            self.target_media.pause()
             self._minimize_browser()
 
         # 切回游戏时也稍微延迟一下，确保之前的动作（比如关闭浏览器）已经执行
@@ -909,11 +933,24 @@ class VisualHandler(QObject):
             user32.SetForegroundWindow(hwnd)
 
     def _open_boss_key_target(self, target_type, target, delay_ms):
+        self._boss_key_request += 1
+        request = self._boss_key_request
         def _action(t_type=target_type, t_val=target):
             # 如果在延迟期间玩家已经复活，则取消切屏
-            if not getattr(self, '_boss_key_triggered', False):
+            if not self._boss_key_triggered or request != self._boss_key_request:
                 return
+            decision = self.death_switch_guard.decision()
+            if decision == 'skip':
+                self._cancel_death_switch()
+                return
+            if decision == 'wait':
+                QTimer.singleShot(100, _action)
+                return
+            self._boss_key_has_switched = True
+            self._media_was_away = False
 
+            if self.boss_key_action == 'pause':
+                self.target_media.prepare(default_media_target(t_type, t_val))
             # 首先最小化 CS2
             self.signals.minimize_game.emit()
 
@@ -928,146 +965,66 @@ class VisualHandler(QObject):
                 if not t_val.startswith(('http://', 'https://')):
                     t_val = 'https://' + t_val
 
-                # 严格控制：只要在这局游戏运行期间打开过一次浏览器，就绝对不再调用 openUrl 弹新标签
-                if not getattr(self, '_browser_opened', False):
+                # Only reuse a confirmed target-site window. An unrelated
+                # browser window must not suppress opening the configured URL.
+                if not self._activate_browser_window():
+                    self._boss_key_window = None
                     from PySide6.QtGui import QDesktopServices
                     QDesktopServices.openUrl(QUrl(t_val))
                     self._browser_opened = True
-                else:
-                    # 尝试将已有的浏览器窗口置于前台
-                    success = self._activate_browser_window()
-                    if not success:
-                        # 如果系统里确实没找到任何浏览器窗口（可能用户手动关掉了），则重新打开
-                        from PySide6.QtGui import QDesktopServices
-                        QDesktopServices.openUrl(QUrl(t_val))
-                        self._browser_opened = True
 
             if self.boss_key_action == 'pause':
-                # 在切出游戏时发送暂停/播放媒体键
-                # 只有当系统没有发声（处于暂停状态）时，我们才发送“播放”指令
-                is_playing = self._is_audio_playing()
-                if not is_playing:
-                    self._pause_media()
-                # 必须标记为 True，这样在新回合开始时程序才知道需要再发一次按键恢复播放
-                self._browser_muted = True
+                self._start_target_media(request, t_type, t_val)
 
-        if delay_ms > 0:
-            QTimer.singleShot(delay_ms, _action)
-        else:
-            # 使用 timer 稍微延迟一下动作，确保先让出焦点
-            QTimer.singleShot(100, _action)
+        # Let the round-end/team update following the death arrive first.
+        QTimer.singleShot(max(300, delay_ms), _action)
+
+    def _cancel_death_switch(self):
+        self._boss_key_request += 1
+        self._boss_key_triggered = False
+        self._boss_key_restore_pending = False
+
+    def _sync_media_focus(self):
+        if (not self.visual_master_enabled or not self.boss_key_enabled
+                or self.boss_key_action != 'pause' or not self._boss_key_has_switched):
+            self._media_was_away = False
+            return
+        if not self.overlay._game_focused:
+            self._media_was_away = True
+        elif self._media_was_away:
+            self._media_was_away = False
+            self._boss_key_request += 1
+            self.target_media.pause()
+
+    def _start_target_media(self, request, target_type, target, attempt=0):
+        if (not self._boss_key_triggered or request != self._boss_key_request
+                or self.boss_key_action != 'pause'):
+            return
+        media_target = foreground_media_target(target_type, target)
+        expected_window = getattr(self, '_boss_key_window', None)
+        if media_target is not None and expected_window and media_target.hwnd != expected_window:
+            media_target = None
+        if media_target is None:
+            if expected_window and attempt in (1, 3, 5):
+                self._activate_browser_window()
+            if attempt < 10:
+                QTimer.singleShot(200, lambda: self._start_target_media(
+                    request, target_type, target, attempt + 1))
+            return
+        self._browser_muted = True
+        self._boss_key_window = media_target.hwnd
+        self.target_media.play(media_target)
 
     def _activate_browser_window(self):
-        try:
-            from ctypes import wintypes
-            user32 = ctypes.windll.user32
-            kernel32 = ctypes.windll.kernel32
-
-            def get_process_name(pid):
-                # 使用 PROCESS_QUERY_LIMITED_INFORMATION (0x1000) 替代 PROCESS_VM_READ，避免权限不足导致获取不到进程名
-                PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-                hProcess = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-                if hProcess:
-                    exe_name = ctypes.create_unicode_buffer(260)
-                    size = wintypes.DWORD(260)
-                    if kernel32.QueryFullProcessImageNameW(hProcess, 0, exe_name, ctypes.byref(size)):
-                        kernel32.CloseHandle(hProcess)
-                        return exe_name.value
-                    kernel32.CloseHandle(hProcess)
-                return ""
-
-            found = False
-
-            def enum_windows_proc(hwnd, lParam):
-                nonlocal found
-                if user32.IsWindowVisible(hwnd):
-                    length = user32.GetWindowTextLengthW(hwnd)
-                    if length > 0:
-                        class_name = ctypes.create_unicode_buffer(256)
-                        user32.GetClassNameW(hwnd, class_name, 256)
-                        cname = class_name.value
-
-                        is_browser = False
-                        # 通过类名快速匹配大多数主流浏览器
-                        if cname in ['Chrome_WidgetWin_1', 'MozillaWindowClass']:
-                            # 但是要排除掉 QQ 和 微信 等也使用了 Chromium 内核的软件
-                            pid = wintypes.DWORD()
-                            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-                            exe_path = get_process_name(pid.value).lower()
-                            exe_name = os.path.basename(exe_path)
-
-                            # 只有当它确实是浏览器进程时才判定为浏览器
-                            browsers = ['msedge.exe', 'chrome.exe', 'firefox.exe', '360se.exe', 'iexplore.exe', 'sogouexplorer.exe', 'browser.exe', 'yandex.exe', 'opera.exe', 'brave.exe']
-                            if any(b in exe_name for b in browsers):
-                                is_browser = True
-                        else:
-                            # 兜底：通过进程名匹配
-                            pid = wintypes.DWORD()
-                            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-                            exe_path = get_process_name(pid.value).lower()
-                            exe_name = os.path.basename(exe_path)
-
-                            browsers = ['msedge.exe', 'chrome.exe', 'firefox.exe', '360se.exe', 'iexplore.exe', 'sogouexplorer.exe', 'browser.exe', 'yandex.exe', 'opera.exe', 'brave.exe']
-
-                            if any(b in exe_name for b in browsers):
-                                is_browser = True
-
-                        if is_browser:
-                            # 过滤掉一些幽灵窗口 (ToolWindow)
-                            GWL_EXSTYLE = -20
-                            WS_EX_TOOLWINDOW = 0x00000080
-                            style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-                            if not (style & WS_EX_TOOLWINDOW):
-                                # 绕过前台窗口限制
-                                current_thread = kernel32.GetCurrentThreadId()
-                                fg_hwnd = user32.GetForegroundWindow()
-
-                                # 使用更安全的方式定义 WINDOWPLACEMENT
-                                class WINDOWPLACEMENT(ctypes.Structure):
-                                    _fields_ = [
-                                        ("length", wintypes.UINT),
-                                        ("flags", wintypes.UINT),
-                                        ("showCmd", wintypes.UINT),
-                                        ("ptMinPosition", wintypes.POINT),
-                                        ("ptMaxPosition", wintypes.POINT),
-                                        ("rcNormalPosition", wintypes.RECT)
-                                    ]
-
-                                # 我们这里获取窗口原本的显示状态
-                                placement = WINDOWPLACEMENT()
-                                placement.length = ctypes.sizeof(WINDOWPLACEMENT)
-                                user32.GetWindowPlacement(hwnd, ctypes.byref(placement))
-
-                                # SW_SHOWMAXIMIZED = 3, SW_RESTORE = 9, WPF_RESTORETOMAXIMIZED = 2
-                                # 如果当前是最大化(3)，或者最小化之前是最大化(flags & 2)，则恢复为最大化
-                                WPF_RESTORETOMAXIMIZED = 0x0002
-                                if placement.showCmd == 3 or (placement.flags & WPF_RESTORETOMAXIMIZED):
-                                    show_cmd = 3
-                                else:
-                                    show_cmd = 9
-
-                                if fg_hwnd:
-                                    fg_thread = user32.GetWindowThreadProcessId(fg_hwnd, None)
-                                    if fg_thread != current_thread:
-                                        user32.AttachThreadInput(current_thread, fg_thread, True)
-                                        user32.ShowWindow(hwnd, show_cmd)
-                                        user32.SetForegroundWindow(hwnd)
-                                        user32.AttachThreadInput(current_thread, fg_thread, False)
-                                        found = True
-                                        return False # 停止枚举
-
-                                user32.ShowWindow(hwnd, show_cmd)
-                                user32.SetForegroundWindow(hwnd)
-                                found = True
-                                return False # 停止枚举
-                return True
-
-            EnumWindowsProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-            user32.EnumWindows(EnumWindowsProc(enum_windows_proc), 0)
-            return found
-        except Exception as e:
-            print(f"激活浏览器窗口失败: {e}")
+        target = default_media_target(self.boss_key_target_type, self.boss_key_target)
+        if target is None:
             return False
+        found = activate_media_window(target, self._boss_key_window)
+        if found is None:
+            return False
+        self._boss_key_window = found.hwnd
+        self._browser_opened = True
+        return True
 
     def _minimize_browser(self):
         try:
@@ -1144,64 +1101,7 @@ class VisualHandler(QObject):
         except Exception as e:
             print(f"最小化浏览器失败: {e}")
 
-    def _pause_media(self):
-        try:
-            # 模拟按下键盘的 播放/暂停 媒体键 (VK_MEDIA_PLAY_PAUSE = 0xB3)
-            user32 = ctypes.windll.user32
-            user32.keybd_event(0xB3, 0, 0, 0) # Key Down
-            user32.keybd_event(0xB3, 0, 2, 0) # Key Up
-        except Exception as e:
-            print(f"发送媒体暂停键失败: {e}")
 
-    def _is_audio_playing(self):
-        """检测目标浏览器或程序是否真的在输出音频，避免“手动暂停后仍被误判为播放中”"""
-        try:
-            from pycaw.pycaw import AudioUtilities, IAudioMeterInformation
-            sessions = AudioUtilities.GetAllSessions()
-
-            # 只关心主流浏览器的真实输出音量，忽略 QQ/系统提示音等其他软件
-            target_browsers = [
-                'msedge.exe', 'chrome.exe', 'firefox.exe', '360se.exe',
-                'iexplore.exe', 'sogouexplorer.exe', 'browser.exe',
-                'yandex.exe', 'opera.exe', 'brave.exe'
-            ]
-
-            # 如果配置了本地程序，也把它加进检测名单
-            if getattr(self, 'boss_key_target_type', 'url') == 'app' and getattr(self, 'boss_key_target', ''):
-                exe_name = os.path.basename(self.boss_key_target).lower()
-                if exe_name.endswith('.lnk'):
-                    try:
-                        import win32com.client
-                        shell = win32com.client.Dispatch("WScript.Shell")
-                        shortcut = shell.CreateShortCut(self.boss_key_target)
-                        exe_name = os.path.basename(shortcut.Targetpath).lower()
-                    except Exception:
-                        pass
-                if exe_name and exe_name not in target_browsers:
-                    target_browsers.append(exe_name)
-
-            for session in sessions:
-                if not session.Process:
-                    continue
-
-                process_name = session.Process.name().lower()
-                if not any(browser == process_name for browser in target_browsers):
-                    continue
-
-                try:
-                    meter = session._ctl.QueryInterface(IAudioMeterInformation)
-                    peak_value = meter.GetPeakValue()
-                except Exception:
-                    peak_value = 0.0
-
-                # 只有浏览器会话存在真实音频输出时，才认为媒体正在播放
-                if peak_value > 0.001:
-                    return True
-
-            return False
-        except Exception as e:
-            print(f"音频状态检测失败: {e}")
-            return False
 
     def _close_browser(self):
         # 如果是本地程序，尝试关闭对应的进程
@@ -1226,6 +1126,7 @@ class VisualHandler(QObject):
                 subprocess.run(["taskkill", "/F", "/IM", b], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
 
     def cleanup(self):
+        self.target_media.close()
         self.config_timer.stop()
         self.overlay.preview_timer.stop()
         self.overlay.geometry_timer.stop()
