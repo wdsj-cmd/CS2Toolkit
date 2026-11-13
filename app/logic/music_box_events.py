@@ -20,6 +20,7 @@ class EventSlot:
 
 SLOTS = (
     EventSlot('main_menu', '主菜单', '大厅或主菜单，适合循环音乐', 0, True, 'mainMenuSong'),
+    EventSlot('team_select', '选择队伍', '进入地图尚未加入 T/CT 时播放，选好队伍后结束', 0, True),
     EventSlot('freeze_time', '准备阶段', '每回合购买与准备阶段，参考 15 秒', 15, True, 'freezeSong'),
     EventSlot('round_start', '回合开始', '准备结束后播放，参考 5 秒', 5, False, 'startSong'),
     EventSlot('bomb_planted', 'C4 已安放', '安包后播放，参考 30 秒', 30, False, 'bombSong'),
@@ -33,7 +34,7 @@ SLOTS = (
     EventSlot('death', '玩家死亡', '自己阵亡时播放，参考 5 秒；安包音乐优先', 5, False, 'deathSong'),
 )
 SLOT_MAP = {slot.key: slot for slot in SLOTS}
-PRIORITY = {'stop': 0, 'main_menu': 10, 'freeze_time': 20, 'round_start': 30, 'death': 40,
+PRIORITY = {'stop': 0, 'main_menu': 10, 'team_select': 15, 'freeze_time': 20, 'round_start': 30, 'death': 40,
             'bomb_planted': 50, 'round_ten_seconds': 60, 'bomb_ten_seconds': 70,
             'bomb_ten_seconds_self': 70, 'bomb_ten_seconds_other': 70,
             'round_won': 80, 'round_lost': 80, 'mvp': 90}
@@ -72,6 +73,8 @@ class MusicEventEngine:
         self.phase = ''
         self.activity = ''
         self.team = ''
+        self.selecting_team = False
+        self.team_selection_done = False
         self.health = None
         self.mvps = None
         self.bomb_state = ''
@@ -170,10 +173,29 @@ class MusicEventEngine:
             bomb_state, planted = 'planted', True
         candidates = []
         entered_menu = activity == 'menu' and not phase and map_info.get('phase') not in ('live', 'warmup')
+        was_selecting = self.selecting_team
+        # GSI exposes map/team state rather than a team-menu visibility event.
+        # Only infer initial selection from an identified, unassigned local
+        # player. Watching another player must not look like team selection.
+        resolved_team = (activity == 'spectating' or bool(player_id and not local)
+                         or (local and player.get('team') in ('T', 'CT', 'SPECTATOR', 'spectator', 'SPEC')))
+        if resolved_team:
+            self.team_selection_done = True
+        self.selecting_team = bool(
+            map_name and map_info.get('phase') in ('live', 'warmup')
+            and local and self.local_id and player_id == self.local_id
+            and not self.team_selection_done and player.get('team') in (None, '', 'unassigned', 'UNASSIGNED')
+            and activity in ('menu', 'playing', 'textinput') and (health is None or health <= 0))
+        if was_selecting and not entered_menu and not resolved_team:
+            # Incomplete packets while the menu is open must not restart it.
+            self.selecting_team = True
         if entered_menu:
             if self.activity != 'menu' or not self.current_cue or self.current_cue.event != 'main_menu':
                 candidates.append('main_menu')
             self.phase = ''
+            self.map_name = self.round_number = None
+            self.team = ''
+            self.selecting_team = self.team_selection_done = False
             self.health = self.mvps = None
             self.round_deadline = self.bomb_deadline = None
             self.bomb_state = ''
@@ -182,8 +204,16 @@ class MusicEventEngine:
             self._local_inventory = self._local_c4_loss = None
             self.local_plant_time = None
             self.ten_played.clear()
+        elif self.selecting_team:
+            if not was_selecting:
+                candidates.append('team_select')
+            self.phase = ''
+            self.health = self.mvps = None
+            self.round_deadline = self.bomb_deadline = None
+            self.bomb_state = ''
+            self.ten_played.clear()
         else:
-            if self.activity == 'menu':
+            if self.activity == 'menu' or was_selecting:
                 candidates.append('stop')
             if phase == 'freezetime' and self.phase != 'freezetime':
                 candidates.append('freeze_time')
