@@ -174,7 +174,7 @@ class MusicEventEngine:
             self.server_plant_received_at = now
         elif terminal:
             self.server_plant_received_at = None
-        elif self.server_plant_received_at is not None:
+        elif not planted and self.server_plant_received_at is not None:
             # A completed plant cannot turn back into a carried/dropped bomb.
             # Retain confirmation through lagging or temporarily absent fields.
             bomb_state, planted = 'planted', True
