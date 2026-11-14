@@ -28,14 +28,27 @@ test('only authenticated loopback websocket pairing parameters are accepted', ()
 });
 
 async function background(tabs, previous) {
-  const messages = [], focused = [], created = [], removed = [], sockets = [];
+  const messages = [], focused = [], created = [], removed = [], sockets = [], sent = [];
+  const windows = [{id: 1, state: 'normal', focused: true}];
   const storage = {pairing: {url: 'ws://127.0.0.1:12345', token: 'a'.repeat(43)}, binding: previous};
   const api = {
     runtime: {onMessage: event(), onStartup: event(), getManifest: () => ({version: '0.1.0'}), reload() {}},
     permissions: {getAll: async () => ({origins: ['*://*.bilibili.com/*']})},
     storage: {local: {get: async () => storage, set: async value => Object.assign(storage, value)}},
     scripting: {executeScript: async () => []},
-    windows: {update: async (id, value) => focused.push({id, value})},
+    windows: {
+      getAll: async () => windows,
+      get: async id => windows.find(window => window.id === id),
+      create: async value => {
+        const tab = {id: 50, windowId: 2, url: value.url};
+        const window = {id: 2, state: 'normal', tabs: [tab]};
+        windows.push(window);tabs.push(tab);created.push(tab);return window;
+      },
+      update: async (id, value) => {
+        const window = windows.find(window => window.id === id);
+        if (value.focused && window.state === 'minimized') throw Error('Cannot focus minimized window');
+        Object.assign(window, value);focused.push({id, value});
+      }},
     tabs: {onCreated: event(), onUpdated: event(), onActivated: event(), onRemoved: event(),
       query: async () => tabs,
       get: async id => { const tab = tabs.find(t => t.id === id); if (!tab) throw Error('closed'); return tab; },
@@ -49,6 +62,7 @@ async function background(tabs, previous) {
     constructor() { this.readyState = 1; sockets.push(this); setImmediate(() => this.onopen?.()); }
     send(text) {
       const value = JSON.parse(text);
+      sent.push(value);
       if (value.type === 'hello') setImmediate(() => {
         this.emit({type: 'authenticated'});
         this.emit({type: 'state', seq: 0, epoch: 'native', url: 'https://www.bilibili.com/', mode: 'free', open: false});
@@ -62,7 +76,7 @@ async function background(tabs, previous) {
     URL, console, setTimeout: () => 1, clearTimeout() {}, setInterval: () => 1, clearInterval() {}};
   vm.runInNewContext(fs.readFileSync(path.join(folder, 'background.js'), 'utf8'), context);
   await flush();
-  return {api, messages, focused, created, removed, sockets, storage,
+  return {api, messages, focused, created, removed, sockets, storage, windows, sent,
     command(value) { sockets.at(-1).emit({type: 'state', epoch: 'native', url: 'https://www.bilibili.com/', ...value}); }};
 }
 test('bound video is reused, a child video follows it, pause affects only owned tabs', async () => {
@@ -105,6 +119,43 @@ test('changing the configured website releases old paused tabs without opening a
   assert.equal(bg.messages[0].message.mode, 'free');
   assert.equal(bg.created.length, 0);
   assert.equal(bg.storage.binding.url, 'https://video.example/watch');
+});
+test('a minimized browser window is restored before tab activation and focus', async () => {
+  const bg = await background([{id: 2, windowId: 1, url: 'https://www.bilibili.com/video/1'}],
+    {url: 'https://www.bilibili.com/', primary: 2, tabs: [2]});
+  bg.windows[0].state = 'minimized';
+  bg.command({seq: 1, mode: 'watch', open: true}); await flush();
+  assert.equal(bg.focused[0].value.state, 'normal');
+  assert.equal(bg.focused.at(-1).value.focused, true);
+  assert(bg.sent.some(message => message.type === 'ack' && message.navigation_ready && message.handled));
+});
+test('a browser with no windows gets an explicit new window instead of relying on current-window tab creation', async () => {
+  const bg = await background([], {url: '', primary: null, tabs: []});
+  bg.windows.length = 0;
+  bg.api.tabs.create = async () => { throw Error('No current window'); };
+  bg.command({seq: 1, mode: 'watch', open: true}); await flush();
+  assert.equal(bg.created.length, 1);
+  assert.equal(bg.created[0].windowId, 2);
+  assert(bg.sent.some(message => message.type === 'ack' && message.navigation_ready));
+});
+test('window activation failure identifies the failing stage without logging browsing URLs', async () => {
+  const bg = await background([{id: 2, windowId: 1, url: 'https://www.bilibili.com/video/1'}],
+    {url: 'https://www.bilibili.com/', primary: 2, tabs: [2]});
+  bg.api.windows.update = async () => { throw Error('No window with id'); };
+  bg.command({seq: 1, mode: 'watch', open: true}); await flush();
+  const failure = bg.sent.find(message => message.reason === 'command_failed');
+  assert.equal(failure.stage, 'window_focus');
+  assert.equal(failure.error_code, 'window_closed');
+  assert(!Object.hasOwn(failure, 'url'));
+});
+test('last known maximized browser state survives a later minimized-window reopen', async () => {
+  const bg = await background([{id: 2, windowId: 1, url: 'https://www.bilibili.com/video/1'}],
+    {url: 'https://www.bilibili.com/', primary: 2, tabs: [2]});
+  bg.windows[0].state = 'maximized';
+  bg.command({seq: 1, mode: 'watch', open: true}); await flush();
+  bg.windows[0].state = 'minimized';bg.focused.length = 0;
+  bg.command({seq: 2, mode: 'watch', open: true}); await flush();
+  assert.equal(bg.focused[0].value.state, 'maximized');
 });
 
 function content() {

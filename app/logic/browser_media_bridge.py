@@ -39,6 +39,7 @@ def permitted(url, origins):
 class BrowserMediaBridge(QObject):
     changed = Signal()
     failed = Signal(str)
+    watch_ready = Signal()
 
     def __init__(self, config, parent=None):
         super().__init__(parent)
@@ -133,9 +134,12 @@ class BrowserMediaBridge(QObject):
             elif message.get('type') == 'ack' and socket is self._active and message.get('seq') == self._seq:
                 client['ack_seq'] = self._seq
                 record('boss_extension_result', mode=self._mode, handled=bool(message.get('handled')),
-                       reason=str(message.get('reason', ''))[:64], media_count=message.get('media_count', 0))
+                       reason=str(message.get('reason', ''))[:64], media_count=message.get('media_count', 0),
+                       stage=str(message.get('stage', ''))[:40], error_code=str(message.get('error_code', ''))[:40])
                 if not message.get('handled'):
                     self._lose_control(str(message.get('reason', 'unavailable'))[:64])
+                elif self._mode == 'watch' and message.get('navigation_ready'):
+                    self.watch_ready.emit()
         except (ValueError, TypeError, AttributeError):
             socket.close()
 

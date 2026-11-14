@@ -603,6 +603,10 @@ class VisualHandler(QObject):
             and getattr(self, 'boss_key_enabled', False)
             and getattr(self, 'boss_key_action', '') == 'pause'
             and self.overlay._game_focused))
+        self._extension_open_request = None
+        if self.browser_bridge is not None:
+            self.browser_bridge.failed.connect(self._extension_open_failed)
+            self.browser_bridge.watch_ready.connect(self._extension_watch_ready)
         QCoreApplication.instance().aboutToQuit.connect(self.target_media.close)
         self._boss_key_request = 0
         self._boss_key_window = None
@@ -897,6 +901,7 @@ class VisualHandler(QObject):
         return False
 
     def _restore_boss_key_context(self):
+        self._extension_open_request = None
         self._media_was_away = False
         self.death_switch_guard.reset()
         self._boss_key_has_switched = False
@@ -998,6 +1003,7 @@ class VisualHandler(QObject):
             bridge = getattr(self, 'browser_bridge', None)
             if (self.boss_key_action == 'pause' and bridge is not None
                     and bridge.open_url(t_val if t_val.startswith(('http://', 'https://')) else 'https://' + t_val)):
+                self._extension_open_request = (request, t_val)
                 hint = bridge.native_target()
                 if hint is not None:
                     self.target_media.prepare(hint)
@@ -1030,7 +1036,39 @@ class VisualHandler(QObject):
         # Let the round-end/team update following the death arrive first.
         QTimer.singleShot(max(300, delay_ms), _action)
 
+    def _extension_watch_ready(self):
+        self._extension_open_request = None
+
+    def _extension_open_failed(self, reason):
+        pending = self._extension_open_request
+        self._extension_open_request = None
+        if (pending is None or pending[0] != self._boss_key_request or not self._boss_key_triggered
+                or not self.boss_key_enabled or self.boss_key_action != 'pause'):
+            return
+        if self.death_switch_guard.decision() == 'skip':
+            self._restore_boss_key_context()
+            return
+        target = pending[1]
+        if not target.startswith(('http://', 'https://')):
+            target = 'https://' + target
+        # A failed extension navigation also needs a navigation fallback, not
+        # just a retry of media-session control in a still-hidden browser.
+        reused = self._activate_browser_window()
+        if reused:
+            opened = True
+        else:
+            self._boss_key_window = None
+            from PySide6.QtGui import QDesktopServices
+            opened = bool(QDesktopServices.openUrl(QUrl(target)))
+        record('boss_browser_fallback', reason=reason, success=opened, reused_window=bool(reused))
+        if opened:
+            self._browser_opened = True
+            self._start_target_media(pending[0], 'url', target)
+        else:
+            self._restore_boss_key_context()
+
     def _cancel_death_switch(self):
+        self._extension_open_request = None
         self._boss_key_request += 1
         self._boss_key_triggered = False
         self._boss_key_restore_pending = False
@@ -1187,6 +1225,13 @@ class VisualHandler(QObject):
                 subprocess.run(["taskkill", "/F", "/IM", b], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
 
     def cleanup(self):
+        self._extension_open_request = None
+        if self.browser_bridge is not None:
+            try:
+                self.browser_bridge.failed.disconnect(self._extension_open_failed)
+                self.browser_bridge.watch_ready.disconnect(self._extension_watch_ready)
+            except (RuntimeError, TypeError):
+                pass
         self.target_media.close()
         self.config_timer.stop()
         self.overlay.preview_timer.stop()

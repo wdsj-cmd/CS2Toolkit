@@ -106,6 +106,19 @@ class BridgeTests(unittest.TestCase):
         until(lambda: messages[-1].get('mode') == 'watch')
         self.assertEqual(messages[-1]['epoch'], watch['epoch'])
 
+    def test_media_only_ack_is_not_mistaken_for_successful_window_navigation(self):
+        client, _ = self.client()
+        ready = Mock()
+        self.bridge.watch_ready.connect(ready)
+        self.bridge.open_url('https://www.bilibili.com/')
+        seq = self.bridge._seq
+        client.sendTextMessage(json.dumps({'type': 'ack', 'seq': seq, 'handled': True}))
+        pump()
+        ready.assert_not_called()
+        client.sendTextMessage(json.dumps({'type': 'ack', 'seq': seq, 'handled': True, 'navigation_ready': True}))
+        pump()
+        ready.assert_called_once()
+
     def test_other_sites_require_extension_permission(self):
         self.client()
         self.assertFalse(self.bridge.open_url('https://www.douyin.com/'))
@@ -136,6 +149,37 @@ class BridgeTests(unittest.TestCase):
         self.client()
         self.bridge.open_url('https://www.bilibili.com/')
         self.assertEqual(self.bridge.native_target().process_name, 'chrome.exe')
+
+    def test_legacy_extension_command_failure_reaches_real_handler_navigation_fallback(self):
+        from app.logic.visual_handler import VisualHandler
+        self.config.values['visual'].update(boss_key_enabled=True, boss_key_action='pause', flash_enabled=False)
+        self.config.browser_bridge = self.bridge
+        handler = VisualHandler(self.config)
+        self.addCleanup(handler.cleanup)
+        handler.overlay.focus_timer.stop()
+        handler.signals.minimize_game.disconnect()
+        handler.signals.minimize_game.connect(Mock())
+        handler._activate_browser_window = Mock(return_value=False)
+        handler._start_target_media = Mock()
+        client, messages = self.client()
+        callbacks = []
+        packet = {'provider': {'steamid': 'self'}, 'map': {'mode': 'competitive', 'phase': 'live'},
+                  'round': {'phase': 'live'}, 'player': {'steamid': 'self', 'team': 'CT', 'state': {'health': 0}},
+                  'allplayers': {'friend': {'team': 'CT', 'state': {'health': 100}}}}
+        with patch('app.logic.visual_handler.record'), \
+                patch.object(handler.target_media, '_ensure_worker'), \
+                patch('app.logic.visual_handler.default_media_target', return_value=None), \
+                patch('app.logic.visual_handler.QTimer.singleShot', side_effect=lambda *args: callbacks.append(args[-1])), \
+                patch('PySide6.QtGui.QDesktopServices.openUrl', return_value=True) as opened:
+            handler.process_gsi(packet)
+            callbacks[0]()
+            pump()
+            watch = next(message for message in messages if message.get('open'))
+            client.sendTextMessage(json.dumps({'type': 'ack', 'seq': watch['seq'], 'handled': False,
+                                              'reason': 'command_failed'}))
+            pump()
+        opened.assert_called_once()
+        handler._start_target_media.assert_called_once()
 
     def test_install_button_is_in_death_switch_dialog_and_uses_the_shared_bridge(self):
         from app.ui.pages.visual_page import VisualConfigDialog

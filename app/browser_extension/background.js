@@ -7,12 +7,22 @@ let state = {seq: -1, mode: 'free', url: ''};
 let binding = {url: '', primary: null, tabs: []};
 let initialized;
 let clientId;
+let windowStates = {};
 const loaded = new Promise(resolve => { initialized = resolve; });
 
 function send(message) {
   if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
 }
-async function persist() { await api.storage.local.set({binding}); }
+async function persist() { await api.storage.local.set({binding, windowStates}); }
+async function step(stage, task) {
+  try { return await task(); }
+  catch (error) {
+    const text = String(error?.message || '').toLowerCase();
+    const code = text.includes('minimiz') ? 'window_minimized' : /no (current )?window/.test(text) ? 'window_closed' :
+      text.includes('no tab') ? 'tab_closed' : text.includes('permission') ? 'permission_denied' : 'api_error';
+    throw {stage, code};
+  }
+}
 function tabMode(id) {
   if (!binding.tabs.includes(id)) return 'free';
   return state.mode === 'watch' && id !== binding.primary ? 'pause' : state.mode;
@@ -25,12 +35,12 @@ async function applyTab(id) {
     return await api.tabs.sendMessage(id, {type: 'policy', mode: tabMode(id), seq: state.seq, epoch: state.epoch});
   } catch { return {handled: false, reason: 'tab_not_ready', media_count: 0}; }
 }
-async function applyAll() {
+async function applyAll(navigationReady = false) {
   const seq = state.seq;
   const results = await Promise.all(binding.tabs.map(applyTab));
   if (seq !== state.seq) return;
   const handled = results.length === 0 || results.some(result => result?.handled);
-  send({type: 'ack', seq, handled,
+  send({type: 'ack', seq, handled, navigation_ready: navigationReady,
     reason: handled ? 'tab_policy_applied' : 'tab_not_ready',
     media_count: results.reduce((sum, result) => sum + (result?.media_count || 0), 0)});
 }
@@ -39,6 +49,7 @@ async function command(next) {
       !['watch', 'pause', 'free'].includes(next.mode)) return;
   state = next;
   const seq = next.seq;
+  let navigationReady = false;
   if (binding.url && binding.url !== next.url) {
     const previous = binding.tabs;
     binding = {url: next.url, primary: null, tabs: []};
@@ -48,12 +59,23 @@ async function command(next) {
     await persist();
   }
   if (next.open && next.mode === 'watch' && P.site(next.url)) {
-    const tabs = await api.tabs.query({});
+    const tabs = await step('tab_lookup', () => api.tabs.query({}));
     if (seq !== state.seq) return;
     const previous = binding.url === next.url ? binding.primary : null;
     let tab = P.chooseTab(tabs, next.url, previous);
     const created = !tab;
-    if (created) tab = await api.tabs.create({url: next.url, active: false});
+    if (created) {
+      const windows = await step('window_list', () => api.windows.getAll({windowTypes: ['normal']}));
+      if (seq !== state.seq) return;
+      const destination = windows.find(window => window.focused) || windows[0];
+      if (destination) {
+        tab = await step('tab_create', () => api.tabs.create({url: next.url, active: false, windowId: destination.id}));
+      } else {
+        const window = await step('window_create', () => api.windows.create({url: next.url, focused: false}));
+        tab = window.tabs?.[0] || (await step('created_tab_lookup', () => api.tabs.query({windowId: window.id})))[0];
+        if (!tab) throw {stage: 'created_tab_lookup', code: 'tab_missing'};
+      }
+    }
     if (seq !== state.seq) {
       if (created) await api.tabs.remove(tab.id);
       return;
@@ -64,12 +86,25 @@ async function command(next) {
     await persist();
     // A pause arriving while the tab is created must not focus/play it later.
     if (seq === state.seq && state.mode === 'watch') {
-      await api.tabs.update(tab.id, {active: true});
-      if (seq === state.seq && state.mode === 'watch') await api.windows.update(tab.windowId, {focused: true});
+      const window = await step('window_lookup', () => api.windows.get(tab.windowId));
+      if (seq !== state.seq || state.mode !== 'watch') return;
+      if (window.state === 'minimized') {
+        const restored = windowStates[tab.windowId] === 'maximized' ? 'maximized' : 'normal';
+        await step('window_restore', () => api.windows.update(tab.windowId, {state: restored}));
+      } else if (['normal', 'maximized'].includes(window.state)) {
+        windowStates[tab.windowId] = window.state;
+      }
+      if (seq !== state.seq || state.mode !== 'watch') return;
+      await step('tab_activate', () => api.tabs.update(tab.id, {active: true}));
+      if (seq === state.seq && state.mode === 'watch') {
+        await step('window_focus', () => api.windows.update(tab.windowId, {focused: true}));
+        await persist();
+        navigationReady = true;
+      }
     }
   }
   if (seq !== state.seq) return;
-  await applyAll();
+  await applyAll(navigationReady);
 }
 async function freeTabs() {
   state = {...state, mode: 'free', seq: state.seq + 1};
@@ -113,7 +148,8 @@ function connect(value, save = false) {
         heartbeat = setInterval(() => send({type: 'ping'}), 20000);
         resolve(true);
       } else if (ready && message.type === 'state') {
-        command(message).catch(() => send({type: 'ack', seq: message.seq, handled: false, reason: 'command_failed'}));
+        command(message).catch(error => send({type: 'ack', seq: message.seq, handled: false,
+          reason: 'command_failed', stage: error?.stage || 'command', error_code: error?.code || 'api_error'}));
       } else if (ready && message.type === 'reload') {
         await freeTabs();
         api.runtime.reload();
@@ -182,7 +218,8 @@ api.runtime.onMessage.addListener((message, sender, respond) => {
 });
 api.runtime.onStartup.addListener(() => { loaded.then(() => pairing && connect(pairing)); });
 (async () => {
-  const saved = await api.storage.local.get(['pairing', 'binding', 'clientId']);
+  const saved = await api.storage.local.get(['pairing', 'binding', 'clientId', 'windowStates']);
+  windowStates = saved.windowStates || {};
   clientId = saved.clientId || crypto.randomUUID();
   if (!saved.clientId) await api.storage.local.set({clientId});
   if (saved.binding?.tabs) binding = saved.binding;
