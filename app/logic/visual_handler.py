@@ -604,6 +604,8 @@ class VisualHandler(QObject):
         self._browser_muted = False
         self._last_match_kills = -1
         self._round_start_kills = 0
+        self._last_local_deaths = None
+        self._kill_life_dead = False
         self._visual_config_signature = None
         self._flash_volume_reduced = False
         self.last_gsi_time = None
@@ -735,6 +737,26 @@ class VisualHandler(QObject):
             self.signals.update_flash.emit(0)
             self._restore_flash_audio_reduction()
 
+        match_stats = player.get('match_stats', {})
+        match_stats = match_stats if isinstance(match_stats, dict) else {}
+        current_match_kills = match_stats.get('kills')
+        if isinstance(current_match_kills, bool) or not isinstance(current_match_kills, int) or current_match_kills < 0:
+            current_match_kills = None
+        deaths = match_stats.get('deaths')
+        deaths_increased = False
+        if not is_observing and isinstance(deaths, int) and not isinstance(deaths, bool) and deaths >= 0:
+            deaths_increased = self._last_local_deaths is not None and deaths > self._last_local_deaths
+            self._last_local_deaths = deaths
+        if not is_observing and health == 0:
+            self._kill_life_dead = True
+        elif not is_observing and health > 0 and (self._kill_life_dead or deaths_increased):
+            # Respawns can occur in the same round; the death counter also
+            # covers a missing health=0 packet. Never use an observed player's kills.
+            baseline = current_match_kills if current_match_kills is not None else max(0, self._last_match_kills)
+            self._last_match_kills = self._round_start_kills = baseline
+            self._kill_life_dead = False
+            self.overlay.hide_kill_icon()
+
         # 2. 死亡与复活处理
         round_info = game_state.get('round', {})
         phase = round_info.get('phase', '')
@@ -770,15 +792,12 @@ class VisualHandler(QObject):
         if self._should_restore_boss_key(phase, health, is_observing):
             self._restore_boss_key_context()
 
-        if phase == 'freezetime' and getattr(self, '_last_phase', '') != 'freezetime':
-            # Round reset
-            match_stats = player.get('match_stats', {})
-            self._round_start_kills = match_stats.get('kills', 0)
+        if (not is_observing and current_match_kills is not None
+                and phase == 'freezetime' and getattr(self, '_last_phase', '') != 'freezetime'):
+            self._round_start_kills = current_match_kills
 
         # 4. 击杀图标处理
-        if self.kill_icon_enabled and not is_observing:
-            match_stats = player.get('match_stats', {})
-            current_match_kills = match_stats.get('kills', 0)
+        if self.kill_icon_enabled and not is_observing and current_match_kills is not None:
 
             if self._last_match_kills == -1:
                 self._last_match_kills = current_match_kills
@@ -807,9 +826,6 @@ class VisualHandler(QObject):
             elif current_match_kills < self._last_match_kills:
                 self._last_match_kills = current_match_kills
                 self._round_start_kills = current_match_kills
-        elif is_observing:
-            match_stats = player.get('match_stats', {})
-            self._last_match_kills = match_stats.get('kills', 0)
 
         self._last_phase = phase
 
