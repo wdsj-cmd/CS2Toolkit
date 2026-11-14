@@ -46,10 +46,13 @@ class MusicBoxController(QObject):
         self.player.set_volume(self.settings['volume'])
         self.player.failed.connect(self._failed)
         self.player.finished.connect(self._finished)
+        if hasattr(self.player, 'loop_finished'):
+            self.player.loop_finished.connect(self._repeat_cue)
         if hasattr(self.player, 'started'):
             self.player.started.connect(self._audio_loaded)
         self._audio_request = None
         self._cue_choice = None
+        self._last_random_clip = {}
         self._bomb_signature = None
         self._bomb_input_signature = None
         self._team_state_signature = None
@@ -353,11 +356,34 @@ class MusicBoxController(QObject):
                 'load_ms': round((time.monotonic() - started) * 1000, 2),
                 'cue_to_loaded_ms': round((time.monotonic() - received) * 1000, 2)})
 
+    @staticmethod
+    def _clip_identity(clip):
+        return (clip['path'], clip.get('start', 0), clip.get('duration', 0))
+
     def _choose_clip(self, event, clips):
         options = event_options(self.kit, event)
-        return dict(random.choice(clips) if options['random'] else clips[options['selected_index']])
+        if not options['random']:
+            return dict(clips[options['selected_index']])
+        key = (self.kit['id'], event)
+        previous = self._last_random_clip.get(key)
+        candidates = [clip for clip in clips if self._clip_identity(clip) != previous] or clips
+        clip = random.choice(candidates)
+        self._last_random_clip[key] = self._clip_identity(clip)
+        return dict(clip)
 
-    def _play_cue(self, cue, resume=False):
+    def _repeat_cue(self):
+        cue = self._team_cue if self._team_menu_open else self.engine.current_cue
+        if self._closed or not self.enabled or self.previewing or not cue or not self._cue_choice or not self.kit:
+            return
+        key, clip = self._cue_choice
+        event = key[3]
+        if key[:3] != (self.kit['id'], cue.event, cue.started) or not clip.get('loop'):
+            return
+        clips = self.kit['tracks'].get(event, [])
+        if event_options(self.kit, event)['random'] and len(clips) > 1:
+            self._play_cue(cue, repeat=True)
+
+    def _play_cue(self, cue, resume=False, repeat=False):
         self._audio_request = None
         if cue.event == 'stop':
             self._cue_choice = None
@@ -385,6 +411,10 @@ class MusicBoxController(QObject):
             clip = self._choose_clip(event, clips)
             # Resuming after a preview keeps this event's original selection.
             self._cue_choice = (key, dict(clip))
+        # A preview can change the draw history; resuming restores the audible
+        # selection as the one to avoid at the next loop boundary.
+        self._last_random_clip[(self.kit['id'], event)] = self._clip_identity(clip)
+        clip_index = next((i for i, item in enumerate(clips) if item == clip), -1)
         if resume and not clip.get('loop'):
             elapsed = max(0, time.monotonic() - cue.started)
             if clip['duration'] > 0 and elapsed >= clip['duration']:
@@ -400,8 +430,12 @@ class MusicBoxController(QObject):
                 self.player.stop()
             clip['fade_ms'] = 15 if cue.event == 'team_select' else 50 if cue.event.startswith('bomb_') else 180
             clip['seamless'] = cue.event.startswith('bomb_') or cue.event == 'round_ten_seconds'
-            self._audio_request = (cue.event, time.monotonic(), cue.started)
+            started = time.monotonic()
+            self._audio_request = (cue.event, started, started if repeat else cue.started)
             self.diagnostic.emit('music_cue', {'cue': cue.event, 'fallback': used_fallback,
+                'repeat': repeat, 'random': event_options(self.kit, event)['random'],
+                'clip_index': clip_index,
+                'clip_count': len(clips),
                 'signal_source': self.engine.plant_signal_source,
                 'c4_warning_lead_ms': self.engine.warning_lead_ms,
                 'owner_source': self.engine.planter_source or 'unavailable'})

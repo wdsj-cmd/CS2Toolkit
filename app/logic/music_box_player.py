@@ -25,6 +25,7 @@ def buffer_has_audio(buffer):
 
 class MusicBoxPlayer(QObject):
     finished = Signal()
+    loop_finished = Signal()
     failed = Signal(str)
     started = Signal()
 
@@ -159,6 +160,11 @@ class MusicBoxPlayer(QObject):
         if self._ended or self.active < 0 or not self.clip:
             return
         if self.clip.get('loop'):
+            token = self._token
+            self.loop_finished.emit()
+            # The controller may start another random slice synchronously.
+            if token != self._token:
+                return
             self.players[self.active].setPosition(round(self.clip.get('start', 0) * 1000))
             self.players[self.active].play()
         else:

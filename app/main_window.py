@@ -41,7 +41,7 @@ class UpdateSignalEmitter(QObject):
 class CS2Tool(FluentWindow):
     def __init__(self):
         super().__init__()
-        self.version = "1.5.1-alpha.2"
+        self.version = "1.5.1-alpha.3"
         self._last_received_flash = None
         self.repo_url = "https://github.com/clover-233/CS2Toolkit"
         self.is_dark_mode = False
@@ -185,7 +185,7 @@ class CS2Tool(FluentWindow):
                 self.setting_tab.gsi_port_input.setEnabled(False)
 
     def init_window(self):
-        self.setWindowTitle("CS2 工具箱 · 1.5.1-alpha.2")
+        self.setWindowTitle("CS2 工具箱 · 1.5.1-alpha.3")
         self.setWindowIcon(QIcon(":/app_icon.ico"))
         self.resize(750, 780)
         self.center()
