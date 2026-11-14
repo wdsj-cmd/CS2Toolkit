@@ -212,8 +212,31 @@ class VisualConfigDialog(MessageBoxBase):
             guard_hint = BodyLabel("热身阶段、回合结束或确认队友全灭时不切屏；数据不足时短暂等待后正常切屏。切回游戏后会继续暂停目标网页的延迟播放。")
             guard_hint.setWordWrap(True)
             self.viewLayout.addWidget(guard_hint)
+            extension_hint = BodyLabel('安装扩展，获得更稳定的网页切换和播放/暂停体验。未连接扩展时自动使用系统媒体控制。', self)
+            extension_hint.setWordWrap(True)
+            self.viewLayout.addWidget(extension_hint)
+            self.extension_install_button = PushButton('安装浏览器扩展', self)
+            self.extension_install_button.clicked.connect(self._install_browser_extension)
+            self.viewLayout.addWidget(self.extension_install_button)
+            self.extension_status = BodyLabel(self)
+            self.extension_status.setWordWrap(True)
+            self.viewLayout.addWidget(self.extension_status)
+            bridge = getattr(self.config_manager, 'browser_bridge', None)
+            self.extension_install_button.setEnabled(bridge is not None)
+            if bridge is not None:
+                bridge.changed.connect(self._update_extension_status)
+            self._update_extension_status()
 
         self.widget.setMinimumWidth(400)
+
+    def _update_extension_status(self):
+        bridge = getattr(self.config_manager, 'browser_bridge', None)
+        self.extension_status.setText(bridge.description() if bridge is not None else '扩展未连接，使用系统媒体控制')
+
+    def _install_browser_extension(self):
+        bridge = getattr(self.config_manager, 'browser_bridge', None)
+        if bridge is not None:
+            bridge.install(self)
 
     def _browse_flash_image(self):
         extensions = ' '.join('*' + ext for ext in sorted(flash_image_extensions()))

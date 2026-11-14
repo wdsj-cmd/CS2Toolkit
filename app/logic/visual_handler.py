@@ -583,6 +583,7 @@ class VisualHandler(QObject):
     def __init__(self, config_manager):
         super().__init__()
         self.config_manager = config_manager
+        self.browser_bridge = getattr(config_manager, 'browser_bridge', None)
         self.signals = VisualSignals()
 
         self.overlay = OverlayWindow()
@@ -597,7 +598,7 @@ class VisualHandler(QObject):
         self.signals.open_boss_key_target.connect(self._open_boss_key_target)
         self.signals.close_browser.connect(self._close_browser)
         self.signals.minimize_browser.connect(self._minimize_browser)
-        self.target_media = TargetMediaController(report=record, foreground_check=lambda: bool(
+        self.target_media = TargetMediaController(report=record, browser_bridge=self.browser_bridge, foreground_check=lambda: bool(
             getattr(self, 'visual_master_enabled', False)
             and getattr(self, 'boss_key_enabled', False)
             and getattr(self, 'boss_key_action', '') == 'pause'
@@ -993,6 +994,16 @@ class VisualHandler(QObject):
             # 首先最小化 CS2
             self.signals.minimize_game.emit()
 
+            bridge = getattr(self, 'browser_bridge', None)
+            if (self.boss_key_action == 'pause' and bridge is not None
+                    and bridge.open_url(t_val if t_val.startswith(('http://', 'https://')) else 'https://' + t_val)):
+                hint = bridge.native_target()
+                if hint is not None:
+                    self.target_media.prepare(hint)
+                self._browser_muted = True
+                self._browser_opened = True
+                return
+
             if t_type == "app":
                 if t_val and os.path.exists(t_val):
                     try:
@@ -1025,6 +1036,11 @@ class VisualHandler(QObject):
         record('boss_switch_skipped', reason=self.death_switch_guard.reason or 'no_teammate_confirmation')
 
     def _sync_media_focus(self):
+        bridge = getattr(self, 'browser_bridge', None)
+        if bridge is not None:
+            if not self.visual_master_enabled or not self.boss_key_enabled or self.boss_key_action != 'pause':
+                bridge.release()
+            bridge.set_game_focus(self.overlay._game_focused)
         if (not self.visual_master_enabled or not self.boss_key_enabled
                 or self.boss_key_action != 'pause' or not self._boss_key_has_switched):
             self._media_was_away = False

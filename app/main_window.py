@@ -19,6 +19,7 @@ from app.logic.gsi_manager import GSIManager
 from app.logic.visual_handler import VisualHandler
 from app.logic.music_box_controller import MusicBoxController
 from app.logic.flash_diagnostics import record
+from app.logic.browser_media_bridge import BrowserMediaBridge
 from app.logic.go_pet_manager import GoPetManager
 from app.logic.launch_manager import LaunchManager
 from app.release_endpoints import UPDATE_URL
@@ -41,12 +42,15 @@ class UpdateSignalEmitter(QObject):
 class CS2Tool(FluentWindow):
     def __init__(self):
         super().__init__()
-        self.version = "1.5.1-alpha.4"
+        self.version = "1.5.1-alpha.5"
         self._last_received_flash = None
         self.repo_url = "https://github.com/clover-233/CS2Toolkit"
         self.is_dark_mode = False
         self._force_quit = False
         self.config_manager = ConfigManager()
+        self.browser_bridge = BrowserMediaBridge(self.config_manager, self)
+        self.config_manager.browser_bridge = self.browser_bridge
+        QApplication.instance().aboutToQuit.connect(self.browser_bridge.close)
 
         # 1. 设定主题与品牌色
         setThemeColor(QColor("#0078D4")) # 品牌蓝色
@@ -185,7 +189,7 @@ class CS2Tool(FluentWindow):
                 self.setting_tab.gsi_port_input.setEnabled(False)
 
     def init_window(self):
-        self.setWindowTitle("CS2 工具箱 · 1.5.1-alpha.4")
+        self.setWindowTitle("CS2 工具箱 · 1.5.1-alpha.5")
         self.setWindowIcon(QIcon(":/app_icon.ico"))
         self.resize(750, 780)
         self.center()

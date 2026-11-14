@@ -224,7 +224,7 @@ async def select_session(sessions, target):
 
 
 class TargetMediaController:
-    def __init__(self, manager_factory=None, report=None, foreground_check=game_in_foreground):
+    def __init__(self, manager_factory=None, report=None, foreground_check=game_in_foreground, browser_bridge=None):
         self._manager_factory = manager_factory
         self._report = report or (lambda *args, **kwargs: None)
         self._commands = queue.Queue()
@@ -243,6 +243,17 @@ class TargetMediaController:
         self._related_key = None
         self._related_checked = 0.0
         self._last_wait_report = None
+        self._bridge = browser_bridge
+        if browser_bridge is not None:
+            browser_bridge.failed.connect(self._extension_fallback)
+
+    def _extension_fallback(self, reason):
+        with self._lock:
+            if self._closed or self._target_hint is None:
+                return
+            self._ensure_worker()
+            command = 'play' if self._desired_playing else 'pause'
+            self._commands.put((command, self._generation, self._target_hint))
 
     def _ensure_worker(self):
         if self._thread is None:
@@ -284,7 +295,8 @@ class TargetMediaController:
             self._desired_playing = False
             worker_running = self._thread is not None and not self._closed
             target_known = self._target_hint is not None
-            if worker_running:
+            extension_handled = bool(self._bridge is not None and self._bridge.pause())
+            if worker_running and not extension_handled:
                 self._commands.put(('pause', self._generation, None))
         self._report('boss_media_pause_requested', worker_running=worker_running,
                      target_known=target_known)
@@ -348,6 +360,8 @@ class TargetMediaController:
         return self._manager
 
     async def _guard_late_media(self):
+        if self._bridge is not None and self._bridge.controls_media:
+            return
         with self._lock:
             if self._closed or self._desired_playing or self._target_hint is None:
                 return
@@ -450,5 +464,11 @@ class TargetMediaController:
             worker = self._thread
             if worker is not None:
                 self._commands.put(('close', self._generation, None))
+        if self._bridge is not None:
+            self._bridge.release()
+            try:
+                self._bridge.failed.disconnect(self._extension_fallback)
+            except (RuntimeError, TypeError):
+                pass
         if worker is not None and worker is not threading.current_thread():
             worker.join(timeout=1)

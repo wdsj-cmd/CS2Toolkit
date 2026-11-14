@@ -131,6 +131,8 @@ def build_exe():
             "--include-package=dxcam",
             "--include-package=numpy",
             "--include-package=winrt",
+            "--include-module=PySide6.QtWebSockets",
+            f"--include-data-dir={os.path.join(os.path.dirname(__file__), 'app', 'browser_extension')}=app/browser_extension",
             "--assume-yes-for-downloads",
             "--output-dir=dist",
             f"--output-filename={output_filename}",
