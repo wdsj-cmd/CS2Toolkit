@@ -74,8 +74,8 @@ def website_words(url):
                  if host == domain or host.endswith('.' + domain)), (host,) if host else ())
 
 
-def find_media_window(target, preferred_hwnd=None):
-    """Only reuse a browser window whose active title identifies the target site."""
+def find_media_windows(target, preferred_hwnd=None):
+    """Find site-identified windows, including newly opened video windows."""
     tracker = GameWindowTracker(target.process_name)
     user32 = tracker.user32
     user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
@@ -89,19 +89,25 @@ def find_media_window(target, preferred_hwnd=None):
         if words and not any(word in title.value.casefold() for word in words):
             return None
         return MediaTarget(target.process_name, title.value, int(hwnd), target.url)
+    matches = []
     if preferred_hwnd:
         found = candidate(preferred_hwnd)
         if found:
-            return found
-    matches = []
+            matches.append(found)
     @tracker.enum_proc
     def visit(hwnd, _):
+        if hwnd == preferred_hwnd:
+            return True
         found = candidate(hwnd)
         if found:
             matches.append(found)
-            return False
         return True
     user32.EnumWindows(visit, 0)
+    return matches
+
+
+def find_media_window(target, preferred_hwnd=None):
+    matches = find_media_windows(target, preferred_hwnd)
     return matches[0] if matches else None
 
 
@@ -188,24 +194,32 @@ def source_matches(process_name, source_id):
                          source_id.lower()) for alias in aliases)
 
 
-async def select_session(sessions, target):
+async def matching_sessions(sessions, target, titles=None):
     candidates = [session for session in sessions
                   if source_matches(target.process_name, session.source_app_user_model_id)]
     site = website_words(target.url) if target.url else ()
     if len(candidates) == 1 and (target.process_name not in BROWSERS
                                or (not target.window_title and not target.url)):
-        return candidates[0]
+        return candidates
     # Several sessions from the same browser: require a unique active-tab title
     # match instead of choosing the system's current (possibly music) session.
     matches = []
+    titles = {} if titles is None else titles
     for session in candidates:
-        properties = await asyncio.wait_for(session.try_get_media_properties_async(), timeout=2)
-        title = properties.title.strip().casefold()
+        if id(session) not in titles:
+            properties = await asyncio.wait_for(session.try_get_media_properties_async(), timeout=2)
+            titles[id(session)] = properties.title.strip().casefold()
+        title = titles[id(session)]
         if title and ((site and (any(name in title for name in site)
                                 or (title in target.window_title.casefold()
                                     and any(name in target.window_title.casefold() for name in site))))
                       or (not site and title in target.window_title.casefold())):
             matches.append(session)
+    return matches
+
+
+async def select_session(sessions, target):
+    matches = await matching_sessions(sessions, target)
     return matches[0] if len(matches) == 1 else None
 
 
@@ -225,9 +239,10 @@ class TargetMediaController:
         self._foreground_check = foreground_check
         self._manager = None
         self._last_guard_error = ''
-        self._related_window = None
+        self._related_windows = []
         self._related_key = None
         self._related_checked = 0.0
+        self._last_wait_report = None
 
     def _ensure_worker(self):
         if self._thread is None:
@@ -267,8 +282,12 @@ class TargetMediaController:
         with self._lock:
             self._generation += 1
             self._desired_playing = False
-            if self._thread is not None and not self._closed:
+            worker_running = self._thread is not None and not self._closed
+            target_known = self._target_hint is not None
+            if worker_running:
                 self._commands.put(('pause', self._generation, None))
+        self._report('boss_media_pause_requested', worker_running=worker_running,
+                     target_known=target_known)
 
     @staticmethod
     async def _get_manager():
@@ -312,12 +331,16 @@ class TargetMediaController:
 
     async def _pause(self):
         session, self._session = self._session, None
+        target = self._target
         self._target = None
         if session is None:
+            self._report('boss_media_pause', success=False, reason='no_bound_session')
             return
-        ok = (int(session.get_playback_info().playback_status) in (0, 3, 5)
+        status = int(session.get_playback_info().playback_status)
+        ok = (status in (0, 3, 5)
               or await asyncio.wait_for(session.try_pause_async(), timeout=3))
-        self._report('boss_media_pause', success=bool(ok))
+        self._report('boss_media_pause', success=bool(ok), status_before=status,
+                     process=target.process_name if target is not None else '')
 
     async def _session_manager(self):
         if self._manager is None:
@@ -338,24 +361,40 @@ class TargetMediaController:
             return
         target = refreshed
         manager = await self._session_manager()
-        session = await select_session(manager.get_sessions(), target)
-        if session is None and target.url:
+        sessions = list(manager.get_sessions())
+        titles = {}
+        matches = await matching_sessions(sessions, target, titles)
+        if target.url:
             key = target.process_name, target.url
             now = time.monotonic()
             if key != self._related_key or now - self._related_checked >= 1.0:
-                self._related_window = find_media_window(target)
+                self._related_windows = find_media_windows(target)
                 self._related_key, self._related_checked = key, now
-            related = self._related_window
-            if related is not None:
-                session = await select_session(manager.get_sessions(), related)
-        if session is None:
+            # A homepage and its video may be in different browser windows.
+            # Match only media identified by the configured website/windows.
+            for related in self._related_windows:
+                for session in await matching_sessions(sessions, related, titles):
+                    if not any(session is existing for existing in matches):
+                        matches.append(session)
+        if not matches:
+            status = (target.process_name, len(sessions), sum(
+                source_matches(target.process_name, item.source_app_user_model_id) for item in sessions))
+            if status != self._last_wait_report:
+                self._last_wait_report = status
+                self._report('boss_media_late_wait', reason='no_matching_session',
+                             process=status[0], total_sessions=status[1], browser_sessions=status[2])
             return
+        self._last_wait_report = None
         with self._lock:
             if not self._current(generation) or self._desired_playing:
                 return
-        if int(session.get_playback_info().playback_status) in (2, 4):
-            ok = await asyncio.wait_for(session.try_pause_async(), timeout=3)
-            self._report('boss_media_late_pause', process=target.process_name, success=bool(ok))
+        for session in matches:
+            if not self._current(generation) or self._desired_playing or not self._foreground_check():
+                return
+            if int(session.get_playback_info().playback_status) in (2, 4):
+                ok = await asyncio.wait_for(session.try_pause_async(), timeout=3)
+                self._report('boss_media_late_pause', process=target.process_name,
+                             success=bool(ok), matched_sessions=len(matches))
 
     def _run(self):
         loop = None

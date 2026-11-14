@@ -1,10 +1,12 @@
-"""Cancel death switching on team/round end without requiring roster data."""
+"""Suppress warmup death switching and cancel pending switches on round end."""
 import time
 
 
 class DeathSwitchGuard:
     def __init__(self, clock=time.monotonic):
         self.clock = clock
+        self.warmup = False
+        self._map_name = None
         self.reset()
 
     def reset(self):
@@ -43,10 +45,26 @@ class DeathSwitchGuard:
         self.reason = reason
 
     def update(self, state):
+        # Keep the last explicit map phase even before a death. Sparse GSI
+        # packets may omit map data during the subsequent death/respawn.
+        map_info = state.get('map', {})
+        name = map_info.get('name')
+        if name and self._map_name and name != self._map_name:
+            self.warmup = False
+        if name:
+            self._map_name = name
+        map_phase = map_info.get('phase')
+        phase = state.get('round', {}).get('phase', '')
+        if map_phase:
+            self.warmup = map_phase == 'warmup'
+        if phase == 'warmup':
+            self.warmup = True
         if not self.active or self.blocked:
             return
         self.last_update = self.clock()
-        phase = state.get('round', {}).get('phase', '')
+        if self.warmup:
+            self._block('warmup')
+            return
         if phase in ('over', 'freezetime') or state.get('map', {}).get('phase') == 'gameover':
             self._block('round_ended')
             return

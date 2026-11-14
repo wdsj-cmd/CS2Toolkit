@@ -669,6 +669,8 @@ class VisualHandler(QObject):
 
         self.boss_key_enabled = config.get('boss_key_enabled', False)
         self.boss_key_target_type = config.get('boss_key_target_type', 'url')
+        # Retired program targets must stay inactive until a website is chosen.
+        self.boss_key_enabled = self.boss_key_enabled and self.boss_key_target_type == 'url'
         self.boss_key_target = config.get('boss_key_target', config.get('boss_key_url', 'https://www.baidu.com'))
         self.boss_key_delay = config.get('boss_key_delay', 0)
         self.boss_key_action = config.get('boss_key_action', 'none')
@@ -689,6 +691,7 @@ class VisualHandler(QObject):
         self._update_config()
         self.last_gsi_time = time.monotonic()
         self.last_flash_value = game_state.get('player', {}).get('state', {}).get('flashed')
+        self.death_switch_guard.update(game_state)
 
         if not self.visual_master_enabled:
             self.overlay._capture_scene_active = False
@@ -731,7 +734,6 @@ class VisualHandler(QObject):
             is_observing = True
         self.last_is_observing = is_observing
         self.overlay._capture_scene_active = not is_observing and health > 0 and activity == 'playing'
-        self.death_switch_guard.update(game_state)
         if (self._boss_key_triggered and not self._boss_key_has_switched
                 and self.death_switch_guard.decision() == 'skip'):
             self._cancel_death_switch()
@@ -965,6 +967,9 @@ class VisualHandler(QObject):
             user32.SetForegroundWindow(hwnd)
 
     def _open_boss_key_target(self, target_type, target, delay_ms):
+        if target_type != 'url':
+            record('boss_switch_skipped', reason='unsupported_target_type')
+            return
         self._boss_key_request += 1
         request = self._boss_key_request
         def _action(t_type=target_type, t_val=target):
@@ -1029,6 +1034,7 @@ class VisualHandler(QObject):
         elif self._media_was_away:
             self._media_was_away = False
             self._boss_key_request += 1
+            record('boss_media_focus_return', action='pause')
             self.target_media.pause()
 
     def _start_target_media(self, request, target_type, target, attempt=0):
