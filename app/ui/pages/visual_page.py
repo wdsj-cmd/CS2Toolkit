@@ -192,7 +192,7 @@ class VisualConfigDialog(MessageBoxBase):
             action_layout = QHBoxLayout()
             action_layout.addWidget(BodyLabel("新回合动作:"))
             self.action_combo = ComboBox(self)
-            self.action_combo.addItems(["无操作 (仅切回游戏)", "关闭浏览器进程 (强制关闭浏览器)", "暂停/播放(推荐视频网站,使用时关闭音乐软件)"])
+            self.action_combo.addItems(["无操作 (仅切回游戏)", "关闭浏览器进程 (强制关闭浏览器)", "定向暂停/播放目标媒体"])
 
             action_val = self.visual_config.get('boss_key_action', 'none')
             if action_val == 'none':
@@ -205,6 +205,9 @@ class VisualConfigDialog(MessageBoxBase):
             self.action_combo.currentIndexChanged.connect(self._on_action_changed)
             action_layout.addWidget(self.action_combo, 1)
             self.viewLayout.addLayout(action_layout)
+            guard_hint = BodyLabel("回合结束或确认队友全灭时不切屏；数据不足时短暂等待后正常切屏。切回游戏后会继续暂停目标网页的延迟播放。")
+            guard_hint.setWordWrap(True)
+            self.viewLayout.addWidget(guard_hint)
             self._update_boss_key_target_ui()
 
         self.widget.setMinimumWidth(400)
@@ -275,9 +278,9 @@ class VisualConfigDialog(MessageBoxBase):
         self.action_combo.blockSignals(True)
         self.action_combo.clear()
         if is_app:
-            self.action_combo.addItems(["无操作 (仅切回游戏)", "强制关闭目标程序进程", "暂停/播放媒体 (如系统音乐/视频)"])
+            self.action_combo.addItems(["无操作 (仅切回游戏)", "强制关闭目标程序进程", "定向暂停/播放目标程序媒体"])
         else:
-            self.action_combo.addItems(["无操作 (仅切回游戏)", "关闭浏览器进程 (强制关闭浏览器)", "暂停/播放(推荐视频网站,使用时关闭音乐软件)"])
+            self.action_combo.addItems(["无操作 (仅切回游戏)", "关闭浏览器进程 (强制关闭浏览器)", "定向暂停/播放目标媒体"])
 
         action_val = self.visual_config.get('boss_key_action', 'none')
         if action_val == 'none':
