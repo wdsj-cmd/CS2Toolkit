@@ -548,6 +548,9 @@ class VisualPage(ScrollArea):
         self.fullscreen_support_card.switchButton.blockSignals(True)
         self.fullscreen_support_card.switchButton.setChecked(self.config_manager.get('launch_use_vulkan', False))
         self.fullscreen_support_card.switchButton.blockSignals(False)
+        self.borderless_card.switchButton.blockSignals(True)
+        self.borderless_card.switchButton.setChecked(self.config_manager.get('launch_borderless', True))
+        self.borderless_card.switchButton.blockSignals(False)
 
     def _save_config(self):
         self.config_manager.set('visual', self.visual_config)
@@ -574,6 +577,14 @@ class VisualPage(ScrollArea):
         self.flash_test_card.clicked.connect(self._preview_flash)
         self.practical_group.addSettingCard(self.flash_test_card)
 
+        self.borderless_card = SwitchSettingCard(
+            icon=FIF.GAME, title="无边框窗口兼容模式",
+            content="通过工具启动游戏时附加 -windowed -noborder；更改后需重启游戏",
+            parent=self.practical_group)
+        self.borderless_card.switchButton.setChecked(self.config_manager.get('launch_borderless', True))
+        self.borderless_card.switchButton.checkedChanged.connect(
+            lambda checked: self.config_manager.set('launch_borderless', checked))
+        self.practical_group.addSettingCard(self.borderless_card)
 
         self.fullscreen_support_card = SwitchSettingCard(
             icon=FIF.GAME,

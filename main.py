@@ -1,4 +1,6 @@
 import sys
+import os
+import traceback
 from PySide6.QtWidgets import QApplication
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
@@ -11,7 +13,21 @@ except ImportError:
 
 SERVER_NAME = "CS2ToolkitSingleInstanceServer_v1"
 
+
+def log_unhandled_exception(kind, error, tb):
+    """Keep Python/Qt callback errors visible in the windowed executable."""
+    try:
+        directory = os.path.join(os.environ.get('LOCALAPPDATA', os.getcwd()), 'CS2Toolkit')
+        os.makedirs(directory, exist_ok=True)
+        with open(os.path.join(directory, 'flashfix-errors.log'), 'a', encoding='utf-8') as log:
+            traceback.print_exception(kind, error, tb, file=log)
+    except OSError:
+        pass
+    if sys.stderr is not None:
+        sys.__excepthook__(kind, error, tb)
+
 if __name__ == "__main__":
+    sys.excepthook = log_unhandled_exception
     app = QApplication(sys.argv)
     
     # 检查是否已有实例运行

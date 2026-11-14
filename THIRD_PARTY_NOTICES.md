@@ -36,6 +36,10 @@ When distributing source code or binary releases, you should review the exact de
 
 ### Platform and External Interfaces
 
+- `DXcam` (https://github.com/ra1nty/DXcam): `MIT`; used for the optional in-memory pre-flash capture.
+- `PyWinRT` (https://github.com/pywinrt/pywinrt): `MIT`; runtime and Windows Media Control projections used for targeted playback control.
+- `NumPy` (https://numpy.org): `BSD-3-Clause`, with additional bundled component notices in the installed NumPy license files; used by the DXcam capture backend.
+
 - `Steam` registry and installation path detection are used only for local discovery of the user's game installation.
 - `Counter-Strike 2` Game State Integration (`GSI`) is used as an external local interface exposed by the game.
 - `Valve`, `Counter-Strike`, `Counter-Strike 2`, and related names, logos, and assets are not part of this project's license grant.

@@ -18,6 +18,7 @@ from app.logic.sound_replacer import SoundReplacer
 from app.logic.gsi_manager import GSIManager
 from app.logic.visual_handler import VisualHandler
 from app.logic.music_box_controller import MusicBoxController
+from app.logic.flash_diagnostics import record
 from app.logic.go_pet_manager import GoPetManager
 from app.logic.launch_manager import LaunchManager
 from app.release_endpoints import UPDATE_URL
@@ -40,7 +41,8 @@ class UpdateSignalEmitter(QObject):
 class CS2Tool(FluentWindow):
     def __init__(self):
         super().__init__()
-        self.version = "1.5.1-alpha"
+        self.version = "1.5.1-alpha.2"
+        self._last_received_flash = None
         self.repo_url = "https://github.com/clover-233/CS2Toolkit"
         self.is_dark_mode = False
         self._force_quit = False
@@ -62,6 +64,7 @@ class CS2Tool(FluentWindow):
         self.gsi_manager = GSIManager(config_manager=self.config_manager)
         self.visual_handler = VisualHandler(self.config_manager)
         self.music_box = MusicBoxController(self.config_manager, self)
+        self.music_box.diagnostic.connect(lambda event, details: record(event, **details))
         QApplication.instance().aboutToQuit.connect(self.music_box.cleanup)
         self.go_pet_manager = GoPetManager(self.config_manager)
         self.steam_path = ""
@@ -164,7 +167,7 @@ class CS2Tool(FluentWindow):
 
     def _deferred_startup_tasks(self):
         self.auto_detect_steam()
-        self.check_for_updates()
+        # This local repair build is checked manually from the About page.
 
         # 启动 GSI Server（路径和配置生成已转移到 _perform_steam_detection 和 browse_steam 中处理）
         self.gsi_manager.start_server()
@@ -182,7 +185,7 @@ class CS2Tool(FluentWindow):
                 self.setting_tab.gsi_port_input.setEnabled(False)
 
     def init_window(self):
-        self.setWindowTitle("CS2 工具箱 · 1.5.1-alpha")
+        self.setWindowTitle("CS2 工具箱 · 1.5.1-alpha.2")
         self.setWindowIcon(QIcon(":/app_icon.ico"))
         self.resize(750, 780)
         self.center()
@@ -478,7 +481,9 @@ class CS2Tool(FluentWindow):
             return
 
         use_vulkan = self.config_manager.get("launch_use_vulkan", False)
-        success, message = LaunchManager.launch_cs2(cs2_path, use_vulkan=use_vulkan)
+        success, message = LaunchManager.launch_cs2(
+            cs2_path, use_vulkan=use_vulkan,
+            borderless=self.config_manager.get('launch_borderless', True))
         if success:
             self.show_success("启动成功", message)
         else:
@@ -538,6 +543,10 @@ class CS2Tool(FluentWindow):
 
             game_state = json.loads(data_str)
             game_state['_toolkit_received_at'] = time.monotonic()
+            flash = game_state.get('player', {}).get('state', {}).get('flashed')
+            if flash != self._last_received_flash:
+                record('gsi_flash_received', flashed=flash)
+                self._last_received_flash = flash
             self.gsi_signal_emitter.data_received.emit(game_state)
         except (json.JSONDecodeError, Exception):
             pass # Ignore malformed data
@@ -561,7 +570,7 @@ class CS2Tool(FluentWindow):
             old_port = game_state.get("old_port")
             new_port = game_state.get("new_port")
             self.config_manager.set("gsi_port", new_port)
-            self.show_warning("GSI端口被占用", f"原端口 {old_port} 被占用，已自动切换至 {new_port}。\n请前往【设置-高级】点击「重新生成GSI配置」并重启游戏，否则音效将失效！", duration=10000)
+            self.show_warning("GSI端口被占用", f"原端口 {old_port} 被占用，已自动切换至 {new_port}。\n服务启动后会自动更新配置；若 CS2 已在运行，请重启游戏。", duration=10000)
             if hasattr(self, 'setting_tab') and hasattr(self.setting_tab, 'gsi_port_input'):
                 self.setting_tab.gsi_port_input.setText(str(new_port))
             return
@@ -572,7 +581,9 @@ class CS2Tool(FluentWindow):
             host = game_state.get("host", "127.0.0.1")
             if isinstance(port, int):
                 self.config_manager.set("gsi_port", port)
-            # Keep the game configuration aligned with the bound listener.
+            # The listener may have switched ports after the initial path check.
+            # Always write the port that was actually bound, rather than leaving
+            # CS2 posting to the old listener.
             if self.gsi_manager.cs2_path:
                 cfg_ok, cfg_message = self.gsi_manager.create_gsi_cfg()
                 if not cfg_ok:
@@ -620,7 +631,7 @@ class CS2Tool(FluentWindow):
                 self.home_tab.status_gsi_server.setStyleSheet("color: green;")
                 self.home_tab.update_gsi_overview()
             # This is where the event matching logic will go
-            # Render time-sensitive visuals before audio/event bookkeeping.
+            # Display time-sensitive visuals before audio/event bookkeeping.
             self.visual_handler.process_gsi(game_state)
             self.music_box.process_gsi(game_state)
             self.integrated_sound_page.process_game_state(game_state)

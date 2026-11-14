@@ -67,6 +67,8 @@ class AboutPage(QWidget):
         about_text.setText("""
 这是一个为CS2设计的多功能软件，可自定义开屏动画、音效、游戏字体与实时播放音效，其他功能还在积极开发中，敬请期待！(｡･ω･｡)<br><br>
 <b>版本: {version}</b><br>
+<b>测试版说明</b><br>
+该测试版由 IOnlyLoveNahida 基于原作者仓库进行 bug 修复和功能开发，未来会重新合并代码。<br><br>
 作者: Moon4Quartz<br>
 作者主页: <a href="https://space.bilibili.com/3537124972300357">https://space.bilibili.com/3537124972300357</a><br>
 开源地址: <a href="{repo_url}">{repo_url}</a><br>

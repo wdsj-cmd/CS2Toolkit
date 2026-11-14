@@ -36,6 +36,10 @@
 
 ### 平台与外部接口
 
+- `DXcam`（https://github.com/ra1nty/DXcam）：`MIT`，用于可选的闪光前画面内存缓存。
+- `PyWinRT`（https://github.com/pywinrt/pywinrt）：`MIT`，用于定向控制目标应用的媒体播放会话。
+- `NumPy`（https://numpy.org）：`BSD-3-Clause`，其他内含组件声明保留在安装包的 NumPy 许可证文件中，用于 DXcam 捕获后端。
+
 - `Steam` 注册表与安装路径检测仅用于本地发现用户游戏安装位置。
 - `Counter-Strike 2` 的 `Game State Integration`（`GSI`）属于游戏提供的本地接口。
 - `Valve`、`Counter-Strike`、`Counter-Strike 2` 及其相关名称、图形、商标和资源，不属于本项目许可证授予范围。

@@ -4,7 +4,6 @@ import webbrowser
 import random
 import json
 import subprocess
-import threading
 import time
 from PySide6.QtWidgets import QWidget, QLabel
 from PySide6.QtCore import Qt, QUrl, QTimer, Signal, QObject, QPropertyAnimation, QSize, QCoreApplication
@@ -13,6 +12,7 @@ from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from .audio_session_controller import AudioSessionController
 from .game_window import GameWindowTracker
+from .flash_diagnostics import record
 from .target_media_controller import (TargetMediaController, foreground_media_target,
                                       default_media_target, activate_media_window)
 from .death_switch_guard import DeathSwitchGuard
@@ -29,7 +29,15 @@ class FlashSurface(QLabel):
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.setAlignment(Qt.AlignCenter)
         self.setWindowOpacity(0.0)
+        self.pending_flash_paint = False
 
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self.pending_flash_paint and self.windowOpacity() > 0:
+            self.pending_flash_paint = False
+            record('flash_painted', opacity=self.windowOpacity(),
+                   width=self.width(), height=self.height(),
+                   image_loaded=not self.pixmap().isNull())
 
 class VisualSignals(QObject):
     update_flash = Signal(int)
@@ -420,6 +428,9 @@ class OverlayWindow(QWidget):
             if not self._flash_active:
                 if self.flash_freeze_background_enabled and self._flash_has_alpha and not self._preview_active:
                     self._frozen_background = self.background_cache.freeze()
+                    status = self.background_cache.status()
+                    record('flash_background_frozen', available=self._frozen_background is not None,
+                           age_ms=status['frozen_age_ms'], frames=status['frames'])
                 self._flash_active = True
             self._render_flash_artwork()
             # 几何信息已由 geometry_timer 定期更新，无需在此处调用
@@ -427,6 +438,7 @@ class OverlayWindow(QWidget):
             # 只要 flashed 为 1，透明度直接设为 1 (100% 显示)
             self.fade_timer.stop()
             self.current_opacity = 1.0
+            self.flash_label.pending_flash_paint = True
             self.flash_opacity_effect.setOpacity(1.0)
             self.flash_label.raise_()
             self._check_game_focus()
@@ -434,6 +446,10 @@ class OverlayWindow(QWidget):
                 self.game_window.place_overlay(self.flash_label.winId())
                 # Flush the first raster frame before any audio worker starts.
                 self.flash_label.repaint()
+            record('overlay_triggered', focused=self._game_focused,
+                   preview=self._preview_active, image_loaded=not self.flash_label.pixmap().isNull(),
+                   opacity=self.flash_label.windowOpacity(), width=self.flash_label.width(),
+                   height=self.flash_label.height())
         else:
             # 当 flashed 变为 0 时，如果图片正在显示，则启动淡出动画
             if self.current_opacity > 0 and not self.fade_timer.isActive():
@@ -581,7 +597,7 @@ class VisualHandler(QObject):
         self.signals.open_boss_key_target.connect(self._open_boss_key_target)
         self.signals.close_browser.connect(self._close_browser)
         self.signals.minimize_browser.connect(self._minimize_browser)
-        self.target_media = TargetMediaController(foreground_check=lambda: bool(
+        self.target_media = TargetMediaController(report=record, foreground_check=lambda: bool(
             getattr(self, 'visual_master_enabled', False)
             and getattr(self, 'boss_key_enabled', False)
             and getattr(self, 'boss_key_action', '') == 'pause'
@@ -593,7 +609,7 @@ class VisualHandler(QObject):
         self._boss_key_has_switched = False
         self._media_was_away = False
         self.overlay.focus_timer.timeout.connect(self._sync_media_focus)
-        self.audio_session_controller = AudioSessionController()
+        self.audio_session_controller = AudioSessionController(report=record)
 
         self.is_flashed = False
         self.is_dead = False
@@ -714,16 +730,19 @@ class VisualHandler(QObject):
               or activity == 'spectating' or not has_valid_team):
             is_observing = True
         self.last_is_observing = is_observing
+        self.overlay._capture_scene_active = not is_observing and health > 0 and activity == 'playing'
         self.death_switch_guard.update(game_state)
         if (self._boss_key_triggered and not self._boss_key_has_switched
                 and self.death_switch_guard.decision() == 'skip'):
             self._cancel_death_switch()
 
         # 1. 闪光弹处理
-        self.overlay._capture_scene_active = not is_observing and health > 0 and activity == 'playing'
         if self.flash_enabled and not is_observing:
             flash_active = state.get('flashed', 0) > 0
             if flash_active != self.is_flashed:
+                record('visual_flash_changed', flashed=state.get('flashed'),
+                       active=flash_active, observing=is_observing,
+                       focused=self.overlay._game_focused)
                 self.is_flashed = flash_active
                 if flash_active:
                     self.last_flash_trigger_time = time.monotonic()
@@ -755,6 +774,7 @@ class VisualHandler(QObject):
             baseline = current_match_kills if current_match_kills is not None else max(0, self._last_match_kills)
             self._last_match_kills = self._round_start_kills = baseline
             self._kill_life_dead = False
+            record('kill_icon_life_reset', baseline=baseline)
             self.overlay.hide_kill_icon()
 
         # 2. 死亡与复活处理
@@ -822,6 +842,7 @@ class VisualHandler(QObject):
                     icon_to_show = self.kill_icon_path
 
                 if icon_to_show and os.path.exists(icon_to_show):
+                    record('kill_icon_trigger', life_kills=current_round_kills)
                     self.signals.show_kill_icon.emit(icon_to_show)
             elif current_match_kills < self._last_match_kills:
                 self._last_match_kills = current_match_kills
@@ -959,6 +980,8 @@ class VisualHandler(QObject):
                 return
             self._boss_key_has_switched = True
             self._media_was_away = False
+            record('boss_switch_allowed', reason='teammate_alive'
+                   if self.death_switch_guard.last_teammate is not None else 'round_end_grace')
 
             if self.boss_key_action == 'pause':
                 self.target_media.prepare(default_media_target(t_type, t_val))
@@ -994,6 +1017,7 @@ class VisualHandler(QObject):
         self._boss_key_request += 1
         self._boss_key_triggered = False
         self._boss_key_restore_pending = False
+        record('boss_switch_skipped', reason=self.death_switch_guard.reason or 'no_teammate_confirmation')
 
     def _sync_media_focus(self):
         if (not self.visual_master_enabled or not self.boss_key_enabled
@@ -1021,6 +1045,8 @@ class VisualHandler(QObject):
             if attempt < 10:
                 QTimer.singleShot(200, lambda: self._start_target_media(
                     request, target_type, target, attempt + 1))
+            else:
+                record('boss_media_target_unavailable')
             return
         self._browser_muted = True
         self._boss_key_window = media_target.hwnd

@@ -49,7 +49,7 @@ class LaunchManager:
             kernel32.CloseHandle(snapshot)
 
     @staticmethod
-    def launch_cs2(cs2_path, use_vulkan=False):
+    def launch_cs2(cs2_path, use_vulkan=False, borderless=False):
         if not cs2_path or not os.path.isdir(cs2_path):
             return False, "CS2 路径无效，请先正确设置游戏路径。"
 
@@ -64,9 +64,13 @@ class LaunchManager:
         command = [steam_exe, "-applaunch", "730"]
         if use_vulkan:
             command.append("-vulkan")
+        if borderless:
+            command.extend(["-windowed", "-noborder"])
 
         try:
             subprocess.Popen(command, cwd=steam_root)
+            if borderless:
+                return True, "已通过 Steam 启动 CS2，并启用无边框窗口兼容模式。"
             if use_vulkan:
                 return True, "已通过 Steam 启动 CS2，并附加 -vulkan 参数。"
             return True, "已通过 Steam 启动 CS2。"
