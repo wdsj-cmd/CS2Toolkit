@@ -18,6 +18,11 @@ class Bridge(QObject):
 
 
 class FallbackTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        recording = patch('app.logic.visual_handler.record')
+        recording.start()
+        self.addCleanup(recording.stop)
+
     async def test_connected_extension_prevents_native_guard_from_controlling_other_browser_tabs(self):
         bridge = Bridge()
         controller = TargetMediaController(browser_bridge=bridge, manager_factory=Mock())

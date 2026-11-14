@@ -987,7 +987,8 @@ class VisualHandler(QObject):
             self._boss_key_has_switched = True
             self._media_was_away = False
             record('boss_switch_allowed', reason='teammate_alive'
-                   if self.death_switch_guard.last_teammate is not None else 'round_end_grace')
+                   if self.death_switch_guard.last_teammate is not None else 'round_end_grace',
+                   mode=getattr(self.death_switch_guard, 'mode', ''))
 
             if self.boss_key_action == 'pause':
                 self.target_media.prepare(default_media_target(t_type, t_val))
@@ -1033,7 +1034,8 @@ class VisualHandler(QObject):
         self._boss_key_request += 1
         self._boss_key_triggered = False
         self._boss_key_restore_pending = False
-        record('boss_switch_skipped', reason=self.death_switch_guard.reason or 'no_teammate_confirmation')
+        record('boss_switch_skipped', reason=self.death_switch_guard.reason or 'no_teammate_confirmation',
+               mode=getattr(self.death_switch_guard, 'mode', ''))
 
     def _sync_media_focus(self):
         bridge = getattr(self, 'browser_bridge', None)

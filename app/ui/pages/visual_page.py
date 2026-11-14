@@ -209,7 +209,7 @@ class VisualConfigDialog(MessageBoxBase):
             self.action_combo.currentIndexChanged.connect(self._on_action_changed)
             action_layout.addWidget(self.action_combo, 1)
             self.viewLayout.addLayout(action_layout)
-            guard_hint = BodyLabel("热身阶段、回合结束或确认队友全灭时不切屏；数据不足时短暂等待后正常切屏。切回游戏后会继续暂停目标网页的延迟播放。")
+            guard_hint = BodyLabel("热身阶段、死斗、军备竞赛、回合结束或确认队友全灭时不切屏；数据不足时短暂等待后正常切屏。切回游戏后会继续暂停目标网页的延迟播放。")
             guard_hint.setWordWrap(True)
             self.viewLayout.addWidget(guard_hint)
             extension_hint = BodyLabel('安装扩展，获得更稳定的网页切换和播放/暂停体验。未连接扩展时自动使用系统媒体控制。', self)

@@ -47,6 +47,9 @@ class Config:
 
 class BridgeTests(unittest.TestCase):
     def setUp(self):
+        recording = patch('app.logic.browser_media_bridge.record')
+        recording.start()
+        self.addCleanup(recording.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.config = Config(self.temp.name)
         self.bridge = BrowserMediaBridge(self.config)
