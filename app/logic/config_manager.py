@@ -39,6 +39,7 @@ class ConfigManager:
             "gsi_events": [],
             "gsi_port": 3000,
             "gsi_enabled": True,
+            "music_box": {"enabled": False, "volume": 50, "selected_kit": ""},
             "go_pet": {
                 "enabled": False,
                 "display_mode": "game",
@@ -337,6 +338,7 @@ class ConfigManager:
             "gsi_events": [],
             "gsi_port": 3000,
             "gsi_enabled": True,
+            "music_box": {"enabled": False, "volume": 50, "selected_kit": ""},
             "go_pet": {
                 "enabled": False,
                 "display_mode": "game",
@@ -425,7 +427,7 @@ class ConfigManager:
                 file_map = {} # path -> relative_name
 
                 # 剔除纯本地偏好设置（保留 theme，剔除 auto_start 和 close_behavior 等）
-                local_keys = ['auto_start', 'close_behavior', 'hide_close_prompt', 'steam_path', 'gsi_port', 'gsi_sound_presets']
+                local_keys = ['auto_start', 'close_behavior', 'hide_close_prompt', 'steam_path', 'gsi_port', 'gsi_sound_presets', 'music_box']
                 for key in local_keys:
                     export_data.pop(key, None)
 
@@ -691,7 +693,7 @@ class ConfigManager:
                 imported_config["bg_path"] = _resolve_path(imported_config.get("bg_path"))
 
             # 过滤掉不应被覆盖的纯本地设置
-            local_keys_to_protect = ['auto_start', 'close_behavior', 'hide_close_prompt', 'steam_path', 'gsi_port', 'gsi_sound_presets']
+            local_keys_to_protect = ['auto_start', 'close_behavior', 'hide_close_prompt', 'steam_path', 'gsi_port', 'gsi_sound_presets', 'music_box']
             for key in local_keys_to_protect:
                 imported_config.pop(key, None)
 
