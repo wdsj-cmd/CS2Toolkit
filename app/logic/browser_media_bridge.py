@@ -60,6 +60,7 @@ class BrowserMediaBridge(QObject):
         self._clients = {}
         self._lock = threading.RLock()
         self._active = None
+        self._resume_client = ''
         self._owned = False
         self._seq = 0
         self._epoch = secrets.token_hex(12)
@@ -107,9 +108,18 @@ class BrowserMediaBridge(QObject):
                     raise ValueError()
                 client.update(authenticated=True, browser=str(message.get('browser', '浏览器'))[:40],
                               version=str(message.get('version', ''))[:24], origins=origins,
-                              process=str(message.get('process', ''))[:40])
+                              process=str(message.get('process', ''))[:40],
+                              identity=str(message.get('client_id', ''))[:64])
                 self._send(socket, {'type': 'authenticated'})
-                self._send(socket, self._snapshot(open_tab=False, mode='free'))
+                if (not self.controls_media and self._active is None and self._want_pause and self._game_focused
+                        and self._resume_client and client['identity'] == self._resume_client
+                        and permitted(self._url, origins)):
+                    self._active, self._owned, self._mode = socket, True, 'pause'
+                    self._seq += 1
+                    self._send(socket, self._snapshot())
+                    self._expect_ack(self._seq, socket)
+                else:
+                    self._send(socket, self._snapshot(open_tab=False, mode='free'))
                 record('boss_extension_connected', browser=client['browser'], version=client['version'])
                 self.changed.emit()
             client['seen'] = time.monotonic()
@@ -183,6 +193,7 @@ class BrowserMediaBridge(QObject):
         if self._active is not None and self._active is not socket:
             self._send(self._active, self._snapshot(mode='free'))
         self._active, self._url = socket, url
+        self._resume_client = self._clients[socket].get('identity', '')
         self._owned = True
         self._want_pause = False
         self._mode = 'watch'
@@ -236,6 +247,7 @@ class BrowserMediaBridge(QObject):
             self._set_mode('free')
         with self._lock:
             self._owned = False
+            self._want_pause = False
 
     def install(self, parent):
         from .browser_extension_install import ExtensionInstaller

@@ -1,6 +1,6 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, patch, AsyncMock
 
 from PySide6.QtCore import QObject, Signal
 
@@ -40,6 +40,27 @@ class FallbackTests(unittest.IsolatedAsyncioTestCase):
         command, generation, target = controller._commands.get_nowait()
         self.assertEqual(command, 'pause')
         self.assertEqual(target.process_name, 'chrome.exe')
+
+    async def test_extension_reconnect_during_native_lookup_cancels_native_pause(self):
+        bridge = Bridge()
+        bridge.controls_media = False
+        pause = AsyncMock(return_value=True)
+        async def properties():
+            bridge.controls_media = True
+            return SimpleNamespace(title='视频_哔哩哔哩_bilibili')
+        session = SimpleNamespace(source_app_user_model_id='Chrome',
+            try_get_media_properties_async=properties, try_pause_async=pause,
+            get_playback_info=lambda: SimpleNamespace(playback_status=4))
+        async def manager():
+            return SimpleNamespace(get_sessions=lambda: [session])
+        controller = TargetMediaController(browser_bridge=bridge, manager_factory=manager,
+                                           foreground_check=lambda: True)
+        self.addCleanup(controller.close)
+        controller._desired_playing = False
+        controller._target_hint = MediaTarget('chrome.exe', '视频_哔哩哔哩_bilibili', url='https://www.bilibili.com/')
+        with patch('app.logic.target_media_controller.find_media_windows', return_value=[]):
+            await controller._guard_late_media()
+        pause.assert_not_awaited()
 
     async def test_extension_open_bypasses_browser_title_activation_and_global_url_open(self):
         bridge = SimpleNamespace(open_url=Mock(return_value=True), native_target=Mock(return_value=None))

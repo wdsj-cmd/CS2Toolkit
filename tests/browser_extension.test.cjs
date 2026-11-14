@@ -58,6 +58,7 @@ async function background(tabs, previous) {
     close() { this.readyState = 3; this.onclose?.(); }
   }
   const context = {chrome: api, CTMediaProtocol: P, WebSocket: Socket, navigator: {userAgent: 'Chrome/130'},
+    crypto: require('node:crypto').webcrypto,
     URL, console, setTimeout: () => 1, clearTimeout() {}, setInterval: () => 1, clearInterval() {}};
   vm.runInNewContext(fs.readFileSync(path.join(folder, 'background.js'), 'utf8'), context);
   await flush();

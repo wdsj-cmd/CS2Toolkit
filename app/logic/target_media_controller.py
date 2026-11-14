@@ -403,6 +403,8 @@ class TargetMediaController:
             if not self._current(generation) or self._desired_playing:
                 return
         for session in matches:
+            if self._bridge is not None and self._bridge.controls_media:
+                return
             if not self._current(generation) or self._desired_playing or not self._foreground_check():
                 return
             if int(session.get_playback_info().playback_status) in (2, 4):

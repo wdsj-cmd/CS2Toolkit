@@ -69,6 +69,7 @@ class BridgeTests(unittest.TestCase):
         until(lambda: client.state() == QAbstractSocket.ConnectedState)
         client.sendTextMessage(json.dumps({'type': 'hello', 'token': token or self.bridge.token,
             'browser': 'Chrome', 'process': 'chrome.exe', 'version': '0.1.0',
+            'client_id': 'test-browser-profile',
             'origins': ['*://*.bilibili.com/*']}))
         pump(.03)
         return client, messages
@@ -132,6 +133,31 @@ class BridgeTests(unittest.TestCase):
         client.close()
         until(lambda: not self.bridge.controls_media)
         self.assertIn('disconnected', errors)
+
+    def test_same_profile_reconnect_restores_pause_without_reopening_or_focusing_a_tab(self):
+        client, _ = self.client()
+        self.bridge.open_url('https://www.bilibili.com/')
+        self.bridge.set_game_focus(True)
+        self.bridge.pause()
+        client.close()
+        until(lambda: self.bridge._active is None)
+        _, messages = self.client()
+        self.assertTrue(self.bridge.controls_media)
+        states = [message for message in messages if message['type'] == 'state']
+        self.assertEqual(states[-1]['mode'], 'pause')
+        self.assertFalse(states[-1]['open'])
+
+    def test_disabling_control_prevents_reconnect_from_rearming_pause(self):
+        client, _ = self.client()
+        self.bridge.open_url('https://www.bilibili.com/')
+        self.bridge.set_game_focus(True)
+        self.bridge.pause()
+        self.bridge.release()
+        client.close()
+        until(lambda: self.bridge._active is None)
+        _, messages = self.client()
+        self.assertFalse(self.bridge.controls_media)
+        self.assertEqual(messages[-1]['mode'], 'free')
 
     def test_stale_negative_ack_cannot_cancel_the_new_pause(self):
         client, _ = self.client()

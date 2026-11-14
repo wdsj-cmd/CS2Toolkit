@@ -6,6 +6,7 @@ let socket, heartbeat, reconnect, pairing, ready = false;
 let state = {seq: -1, mode: 'free', url: ''};
 let binding = {url: '', primary: null, tabs: []};
 let initialized;
+let clientId;
 const loaded = new Promise(resolve => { initialized = resolve; });
 
 function send(message) {
@@ -82,7 +83,7 @@ async function hello() {
     if (navigator.brave && await navigator.brave.isBrave()) browser = 'Brave';
   }
   const process = ({Edge: 'msedge.exe', Firefox: 'firefox.exe', Opera: 'opera.exe', Brave: 'brave.exe'})[browser] || 'chrome.exe';
-  send({type: 'hello', token: pairing.token, browser,
+  send({type: 'hello', token: pairing.token, browser, client_id: clientId,
     version: api.runtime.getManifest().version, process, origins: permissions.origins || []});
 }
 function connect(value, save = false) {
@@ -178,7 +179,9 @@ api.runtime.onMessage.addListener((message, sender, respond) => {
 });
 api.runtime.onStartup.addListener(() => { loaded.then(() => pairing && connect(pairing)); });
 (async () => {
-  const saved = await api.storage.local.get(['pairing', 'binding']);
+  const saved = await api.storage.local.get(['pairing', 'binding', 'clientId']);
+  clientId = saved.clientId || crypto.randomUUID();
+  if (!saved.clientId) await api.storage.local.set({clientId});
   if (saved.binding?.tabs) binding = saved.binding;
   initialized();
   if (saved.pairing) connect(saved.pairing);
