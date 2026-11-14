@@ -5,6 +5,15 @@ from PySide6.QtCore import Qt, QTimer
 from qfluentwidgets import (ScrollArea, SettingCardGroup, SwitchSettingCard, SettingCard,
                            PushSettingCard, PushButton, FluentIcon as FIF, LineEdit, MessageBoxBase, SubtitleLabel, BodyLabel, SwitchButton, Slider, InfoBar)
 
+
+def _web_only_targets(config_manager, visual_config):
+    if visual_config.get('boss_key_target_type', 'url') != 'url':
+        visual_config.update(boss_key_target_type='url', boss_key_target='',
+                             boss_key_url='', boss_key_enabled=False)
+        config_manager.set('visual', visual_config)
+    return visual_config
+
+
 class VisualSettingCard(SettingCard):
     def __init__(self, icon, title, content=None, parent=None):
         super().__init__(icon, title, content, parent)
@@ -24,7 +33,7 @@ class VisualConfigDialog(MessageBoxBase):
         super().__init__(parent)
         self.config_manager = config_manager
         self.dialog_type = dialog_type # 'flash', 'death', 'boss_key'
-        self.visual_config = self.config_manager.get('visual', {})
+        self.visual_config = _web_only_targets(config_manager, config_manager.get('visual', {}))
         self._setup_ui()
 
     def _setup_ui(self):
@@ -154,10 +163,6 @@ class VisualConfigDialog(MessageBoxBase):
             self.viewLayout.addLayout(scale_layout)
 
         elif self.dialog_type == 'boss_key':
-            if self.visual_config.get('boss_key_target_type', 'url') != 'url':
-                self.visual_config.update(boss_key_target_type='url', boss_key_target='',
-                                          boss_key_url='', boss_key_enabled=False)
-                self.config_manager.set('visual', self.visual_config)
             self.titleLabel = SubtitleLabel('死后自动打开内容', self)
             self.viewLayout.addWidget(self.titleLabel)
 
@@ -467,7 +472,7 @@ class VisualPage(ScrollArea):
         self._setup_ui()
 
     def _init_config(self):
-        self.visual_config = self.config_manager.get('visual', {
+        self.visual_config = _web_only_targets(self.config_manager, self.config_manager.get('visual', {
             'visual_master_enabled': True,
             'flash_enabled': False,
             'flash_path': '',
@@ -491,7 +496,7 @@ class VisualPage(ScrollArea):
             'kill_icon_bottom': 100,
             'kill_icon_path': '',
             'kill_icons_1_5': [{} for _ in range(5)]
-        })
+        }))
 
     def _update_ui_from_config(self):
         self._init_config()
@@ -618,6 +623,8 @@ class VisualPage(ScrollArea):
         else:
             dialog = VisualConfigDialog(self.config_manager, type, self)
         dialog.exec()
+        if type == 'boss_key':
+            self._update_ui_from_config()
 
     def _refresh_flash_status(self):
         handler = getattr(self.parent_window, 'visual_handler', None)
