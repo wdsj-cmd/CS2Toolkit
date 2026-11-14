@@ -39,6 +39,14 @@ async function command(next) {
       !['watch', 'pause', 'free'].includes(next.mode)) return;
   state = next;
   const seq = next.seq;
+  if (binding.url && binding.url !== next.url) {
+    const previous = binding.tabs;
+    binding = {url: next.url, primary: null, tabs: []};
+    await Promise.all(previous.map(id => api.tabs.sendMessage(id,
+      {type: 'policy', mode: 'free', seq, epoch: state.epoch}).catch(() => {})));
+    if (seq !== state.seq) return;
+    await persist();
+  }
   if (next.open && next.mode === 'watch' && P.site(next.url)) {
     const tabs = await api.tabs.query({});
     if (seq !== state.seq) return;
@@ -50,12 +58,7 @@ async function command(next) {
       if (created) await api.tabs.remove(tab.id);
       return;
     }
-    if (binding.url !== next.url) {
-      await Promise.all(binding.tabs.map(id => api.tabs.sendMessage(id,
-        {type: 'policy', mode: 'free', seq, epoch: state.epoch}).catch(() => {})));
-      if (seq !== state.seq) return;
-      binding = {url: next.url, primary: null, tabs: []};
-    }
+    binding.url = next.url;
     binding.primary = tab.id;
     binding.tabs = [...new Set([...binding.tabs, tab.id])];
     await persist();

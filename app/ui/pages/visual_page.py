@@ -272,6 +272,9 @@ class VisualConfigDialog(MessageBoxBase):
         self.visual_config['boss_key_target'] = text
         self.visual_config['boss_key_url'] = text
         self.config_manager.set('visual', self.visual_config)
+        bridge = getattr(self.config_manager, 'browser_bridge', None)
+        if bridge is not None:
+            bridge.configure_url(text)
 
     def _on_delay_changed(self, value):
         self.visual_config['boss_key_delay'] = value

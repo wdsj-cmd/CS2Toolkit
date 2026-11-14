@@ -204,6 +204,20 @@ class BrowserMediaBridge(QObject):
         self._expect_ack(seq, socket)
         return True
 
+    def configure_url(self, url):
+        """Publish a changed setting before the site has permission to open."""
+        url = url.strip()
+        if '://' not in url:
+            url = 'https://' + url
+        if not website(url) or url == self._url:
+            return
+        self.release()
+        self._url = url
+        self._seq += 1
+        for socket, client in list(self._clients.items()):
+            if client['authenticated']:
+                self._send(socket, self._snapshot(mode='free'))
+
     def _expect_ack(self, seq, socket):
         client = self._clients.get(socket)
         if client is None:

@@ -62,7 +62,7 @@ async function background(tabs, previous) {
     URL, console, setTimeout: () => 1, clearTimeout() {}, setInterval: () => 1, clearInterval() {}};
   vm.runInNewContext(fs.readFileSync(path.join(folder, 'background.js'), 'utf8'), context);
   await flush();
-  return {api, messages, focused, created, removed, sockets,
+  return {api, messages, focused, created, removed, sockets, storage,
     command(value) { sockets.at(-1).emit({type: 'state', epoch: 'native', url: 'https://www.bilibili.com/', ...value}); }};
 }
 test('bound video is reused, a child video follows it, pause affects only owned tabs', async () => {
@@ -92,6 +92,19 @@ test('a pause during asynchronous tab creation closes the stale created tab with
   finish({id: 50, windowId: 1, url: 'https://www.bilibili.com/'}); await flush();
   assert.deepEqual(bg.removed, [50]);
   assert.equal(bg.focused.length, 0);
+});
+test('changing the configured website releases old paused tabs without opening a new page', async () => {
+  const tabs = [{id: 2, windowId: 1, active: true, url: 'https://www.bilibili.com/video/1'}];
+  const bg = await background(tabs, {url: '', primary: null, tabs: []});
+  bg.command({seq: 1, mode: 'watch', open: true}); await flush();
+  assert.equal(bg.storage.binding.url, 'https://www.bilibili.com/');
+  bg.command({seq: 2, mode: 'pause', open: false}); await flush();
+  bg.messages.length = 0;
+  bg.command({seq: 3, mode: 'free', open: false, url: 'https://video.example/watch'}); await flush();
+  assert.deepEqual(bg.messages.map(item => item.id), [2]);
+  assert.equal(bg.messages[0].message.mode, 'free');
+  assert.equal(bg.created.length, 0);
+  assert.equal(bg.storage.binding.url, 'https://video.example/watch');
 });
 
 function content() {

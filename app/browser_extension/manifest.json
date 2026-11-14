@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "CS2Toolkit 网页连接",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "配合 CS2 工具箱，稳定绑定目标网页，在死亡切屏和返回游戏时控制视频播放与暂停。",
   "minimum_chrome_version": "116",
   "permissions": ["storage", "tabs", "scripting"],

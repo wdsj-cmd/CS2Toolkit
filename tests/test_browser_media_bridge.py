@@ -111,6 +111,27 @@ class BridgeTests(unittest.TestCase):
         self.assertFalse(self.bridge.open_url('https://www.douyin.com/'))
         self.assertFalse(self.bridge.open_url('javascript:alert(1)'))
 
+    def test_new_site_setting_reaches_extension_before_permission_is_granted(self):
+        client, messages = self.client()
+        self.bridge.configure_url('https://video.example/watch')
+        until(lambda: messages[-1].get('url') == 'https://video.example/watch')
+        self.assertEqual(messages[-1]['mode'], 'free')
+        self.assertFalse(messages[-1]['open'])
+        self.assertFalse(self.bridge.open_url('https://video.example/watch'))
+        client.sendTextMessage(json.dumps({'type': 'permissions', 'origins': ['https://video.example/*']}))
+        pump()
+        self.assertTrue(self.bridge.open_url('https://video.example/watch'))
+
+    def test_website_field_updates_the_shared_extension_target_without_restarting(self):
+        from app.ui.pages.visual_page import VisualConfigDialog
+        self.config.browser_bridge = self.bridge
+        parent = QWidget()
+        dialog = VisualConfigDialog(self.config, 'boss_key', parent)
+        dialog.target_input.setText('https://video.example/watch')
+        self.assertEqual(self.bridge._url, 'https://video.example/watch')
+        self.assertEqual(self.config.values['visual']['boss_key_target'], 'https://video.example/watch')
+        dialog.close(); parent.close()
+
     def test_native_fallback_hint_uses_the_bound_browsers_process(self):
         self.client()
         self.bridge.open_url('https://www.bilibili.com/')
