@@ -158,7 +158,7 @@ test('last known maximized browser state survives a later minimized-window reope
   assert.equal(bg.focused[0].value.state, 'maximized');
 });
 
-function content() {
+function content(legacyGuard) {
   const elements = [], handlers = {}, observers = [], listeners = [], timers = new Map(), reports = [];
   let clock = 0, nextTimer = 0;
   let resolvePlay;
@@ -179,6 +179,7 @@ function content() {
       reports.push(value);return {ok: true};
     }}};
   const context = {chrome, MutationObserver: Observer, document, queueMicrotask, console,
+    __cs2ToolkitMedia: legacyGuard,
     innerWidth: 1920, innerHeight: 1080,
     getComputedStyle: item => ({display: item.hidden ? 'none' : 'block', visibility: 'visible', opacity: '1'}),
     Date: {now: () => clock},
@@ -288,6 +289,28 @@ test('a primary tab playback failure cannot be masked by a successful secondary 
   bg.command({seq: 1, mode: 'watch', open: true});await flush();
   const result = bg.sent.find(value => value.seq === 1 && value.type === 'ack');
   assert.equal(result.handled, false);assert.equal(result.reason, 'autoplay_blocked');
+});
+
+test('legacy boolean injection guard does not prevent installing the updated media controller', async () => {
+  const c = content(true);await flush();
+  assert.equal(c.listeners.length, 1);
+  c.element.play = function() { this.paused = false;return Promise.resolve(); };
+  await c.policy('watch', 1);assert.equal(c.element.paused, false);
+});
+
+test('only current primary-tab retry results can change the native playback result', async () => {
+  const tab = {id: 2, windowId: 1, url: 'https://www.bilibili.com/video/1'};
+  const bg = await background([tab], {url: 'https://www.bilibili.com/', primary: 2, tabs: [2]});
+  bg.command({seq: 1, mode: 'watch', open: true});await flush();bg.sent.length = 0;
+  const message = {type: 'policy_result', seq: 1, epoch: 'native', handled: false,
+    reason: 'autoplay_blocked', media_count: 1};
+  const report = (value, sender) => new Promise(resolve => bg.api.runtime.onMessage.listeners[0](value, sender, resolve));
+  await report({...message, seq: 0}, {tab});
+  await report(message, {tab: {...tab, id: 99}});
+  assert.equal(bg.sent.length, 0);
+  await report(message, {tab});
+  assert.equal(bg.sent.at(-1).reason, 'autoplay_blocked');
+  assert.equal(bg.sent.at(-1).handled, false);
 });
 test('stale play completion and stale initial policy cannot undo a new pause', async () => {
   const c = content(); await flush();
