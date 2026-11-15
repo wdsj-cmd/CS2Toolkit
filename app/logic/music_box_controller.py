@@ -5,7 +5,7 @@ import math
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from .music_box_events import MusicEventEngine, MusicCue, SLOT_MAP, object_node, number
+from .music_box_events import MusicEventEngine, MusicCue, SLOT_MAP, FINISH_BEFORE_SWITCH_EVENTS, object_node, number
 from .music_box_library import MusicKitLibrary, event_options, validate_clip
 from .music_box_player import MusicBoxPlayer
 from .music_bomb_visual import BombVisualMonitor
@@ -52,6 +52,9 @@ class MusicBoxController(QObject):
             self.player.started.connect(self._audio_loaded)
         self._audio_request = None
         self._cue_choice = None
+        self._protected_cue = None
+        self._pending_result_cues = []
+        self._pending_cue = None
         self._last_random_clip = {}
         self._bomb_signature = None
         self._bomb_input_signature = None
@@ -193,6 +196,7 @@ class MusicBoxController(QObject):
     def _on_team_menu(self, visible):
         if self._closed or visible == self._team_menu_open:
             return
+        self._clear_playback_protection()
         self._team_menu_open = visible
         already_playing = False
         if visible:
@@ -383,7 +387,22 @@ class MusicBoxController(QObject):
         if event_options(self.kit, event)['random'] and len(clips) > 1:
             self._play_cue(cue, repeat=True)
 
-    def _play_cue(self, cue, resume=False, repeat=False):
+    def _clear_playback_protection(self):
+        self._protected_cue = None
+        self._pending_result_cues.clear()
+        self._pending_cue = None
+
+    def _play_cue(self, cue, resume=False, repeat=False, round_result=None):
+        if self._protected_cue is not None:
+            if cue != self._protected_cue:
+                pending = (cue, self.engine.round_result if round_result is None else round_result)
+                if cue.event in FINISH_BEFORE_SWITCH_EVENTS:
+                    if not any(item[0] == cue for item in self._pending_result_cues):
+                        self._pending_result_cues.append(pending)
+                else:
+                    # Keep current game context, not a backlog of expired phases.
+                    self._pending_cue = pending
+            return
         self._audio_request = None
         if cue.event == 'stop':
             self._cue_choice = None
@@ -395,7 +414,7 @@ class MusicBoxController(QObject):
         used_fallback = False
         if not clips and self.kit:
             fallback = ('bomb_ten_seconds' if cue.event in ('bomb_ten_seconds_self', 'bomb_ten_seconds_other')
-                        else self.engine.round_result if cue.event == 'mvp' else '')
+                        else (self.engine.round_result if round_result is None else round_result) if cue.event == 'mvp' else '')
             event = fallback
             clips = self.kit['tracks'].get(event, [])
             used_fallback = bool(clips)
@@ -426,6 +445,11 @@ class MusicBoxController(QObject):
                 clip['duration'] -= elapsed
         try:
             path = self.library.resolve(self.kit, clip)
+            protected = (cue.event in FINISH_BEFORE_SWITCH_EVENTS
+                         and event_options(self.kit, cue.event)['finish_before_switch'])
+            if protected:
+                clip['loop'] = False
+                self._protected_cue = cue
             if cue.event == 'team_select':
                 self.player.stop()
             clip['fade_ms'] = 15 if cue.event == 'team_select' else 50 if cue.event.startswith('bomb_') else 180
@@ -446,10 +470,14 @@ class MusicBoxController(QObject):
                              + ('（通用兜底）' if used_fallback and cue.event.startswith('bomb_ten_seconds') else '')
                              + ('（安包者未知）' if cue.event == 'bomb_ten_seconds' else '')
                              + ' · ' + clip.get('name', path.name))
+            elif protected and self._protected_cue == cue:
+                self._protected_cue = None
+                self._play_deferred_cue()
         except (OSError, ValueError) as exc:
             self._failed(str(exc))
 
     def preview(self, event, clip=None):
+        self._clear_playback_protection()
         self._audio_request = None
         if clip is None:
             clips = self.kit['tracks'].get(event, []) if self.kit else []
@@ -470,6 +498,10 @@ class MusicBoxController(QObject):
             self.previewing = False
 
     def _finished(self):
+        if self._protected_cue is not None:
+            self._protected_cue = None
+        if self._play_deferred_cue():
+            return
         if self.previewing:
             self.previewing = False
             if self.enabled and (self.engine.current_cue or self._team_menu_open):
@@ -477,12 +509,28 @@ class MusicBoxController(QObject):
                 return
         self._status('播放结束，等待下一个音乐事件')
 
+    def _play_deferred_cue(self):
+        if self._closed or not self.enabled or self.previewing:
+            return False
+        while self._pending_result_cues or self._pending_cue is not None:
+            if self._pending_result_cues:
+                cue, result = self._pending_result_cues.pop(0)
+            else:
+                (cue, result), self._pending_cue = self._pending_cue, None
+            self._play_cue(cue, round_result=result)
+            # A deferred result without protection can be superseded normally.
+            if self._protected_cue is not None or not (self._pending_result_cues or self._pending_cue):
+                return True
+        return False
+
     def _failed(self, message):
+        self._protected_cue = None
         self._audio_request = None
         self.player.stop()
         self.previewing = False
         self._status('播放提示 · ' + message)
         self.error.emit(message)
+        self._play_deferred_cue()
 
     def end_preview(self):
         if self.previewing:
@@ -494,6 +542,7 @@ class MusicBoxController(QObject):
                 self._status('试听已结束')
 
     def stop(self):
+        self._clear_playback_protection()
         self._audio_request = None
         self.previewing = False
         self.player.stop()
@@ -508,6 +557,7 @@ class MusicBoxController(QObject):
             self._update_visual_context()
             self._update_clock_context()
             if not self.previewing:
+                self._clear_playback_protection()
                 self.player.stop()
                 self._status('游戏数据已断开，等待重新连接')
             return
@@ -520,6 +570,7 @@ class MusicBoxController(QObject):
         if self._closed:
             return
         self._closed = True
+        self._clear_playback_protection()
         self.visual_monitor.stop()
         self.clock_monitor.stop()
         self.tick_timer.stop()

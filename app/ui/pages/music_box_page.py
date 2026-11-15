@@ -10,7 +10,7 @@ from qfluentwidgets import (
     Slider, SpinBox, SubtitleLabel, SwitchButton, TitleLabel,
 )
 
-from app.logic.music_box_events import SLOTS, SLOT_MAP
+from app.logic.music_box_events import SLOTS, SLOT_MAP, FINISH_BEFORE_SWITCH_EVENTS
 from app.logic.music_box_library import AUDIO_EXTENSIONS, event_options, validate_clip
 from app.ui.fluent_dialogs import TextInputDialog
 
@@ -55,6 +55,19 @@ class ClipDialog(MessageBoxBase):
         self.random_play.setChecked(options['random'])
         random_row.addWidget(self.random_play)
         self.viewLayout.addLayout(random_row)
+        self.finish_before_switch = None
+        if event in FINISH_BEFORE_SWITCH_EVENTS:
+            finish_row = QHBoxLayout()
+            finish_row.addWidget(BodyLabel('完整播放后切换', self), 1)
+            self.finish_before_switch = SwitchButton(self)
+            self.finish_before_switch.setOnText('播完当前切片再切换')
+            self.finish_before_switch.setOffText('允许新事件打断')
+            self.finish_before_switch.setChecked(options['finish_before_switch'])
+            finish_row.addWidget(self.finish_before_switch)
+            self.viewLayout.addLayout(finish_row)
+            finish_hint = CaptionLabel('按设置时长完整播放一次；时长为 0 时播完剩余音频。停止播放和手动试听仍立即生效。', self)
+            finish_hint.setWordWrap(True)
+            self.viewLayout.addWidget(finish_hint)
         self.list = ListWidget(self)
         self.list.setFixedHeight(126)
         self.viewLayout.addWidget(self.list)
@@ -110,7 +123,8 @@ class ClipDialog(MessageBoxBase):
         self._refresh(options['selected_index'])
 
     def playback_options(self):
-        return {'random': self.random_play.isChecked(), 'selected_index': max(0, self.current)}
+        return {'random': self.random_play.isChecked(), 'selected_index': max(0, self.current),
+                'finish_before_switch': bool(self.finish_before_switch and self.finish_before_switch.isChecked())}
 
     def _refresh(self, selected=0):
         self.current = -1
