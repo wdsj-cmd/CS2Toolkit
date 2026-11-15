@@ -22,10 +22,14 @@ def validate_event_options(options, clip_count):
     if not isinstance(options, dict):
         raise ValueError('事件播放设置格式不正确')
     random_play = options.get('random', True)
+    finish_before_switch = options.get('finish_before_switch', False)
     selected = options.get('selected_index', 0)
     if not isinstance(random_play, bool) or type(selected) is not int:
         raise ValueError('随机播放或固定切片设置无效')
+    if not isinstance(finish_before_switch, bool):
+        raise ValueError('完整播放后切换设置无效')
     return {'random': random_play,
+            'finish_before_switch': finish_before_switch,
             'selected_index': max(0, min(selected, clip_count - 1))}
 
 
