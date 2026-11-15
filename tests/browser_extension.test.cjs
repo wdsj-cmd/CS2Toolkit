@@ -159,20 +159,42 @@ test('last known maximized browser state survives a later minimized-window reope
 });
 
 function content() {
-  const elements = [], handlers = {}, observers = [], listeners = [];
+  const elements = [], handlers = {}, observers = [], listeners = [], timers = new Map(), reports = [];
+  let clock = 0, nextTimer = 0;
   let resolvePlay;
   const element = {paused: true, pauses: 0, plays: 0, clientWidth: 100, clientHeight: 100,
+    tagName: 'VIDEO',
+    getBoundingClientRect: () => ({left: 0, top: 0, right: 100, bottom: 100}),
     pause() { this.paused = true; this.pauses++; },
     play() { this.paused = false; this.plays++; return new Promise(resolve => { resolvePlay = resolve; }); }};
   elements.push(element);
-  const document = {querySelectorAll: () => elements,
-    addEventListener(name, listener) { handlers[name] = listener; }};
+  const document = {visibilityState: 'visible', querySelectorAll: () => elements,
+    addEventListener(name, listener) { handlers[name] = listener; },
+    removeEventListener(name, listener) { if (handlers[name] === listener) delete handlers[name]; }};
   class Observer { constructor(fn) { this.fn = fn; observers.push(this); } observe() {} disconnect() {} }
-  const chrome = {runtime: {onMessage: {addListener(fn) { listeners.push(fn); }},
-    sendMessage: async () => ({type: 'policy', epoch: 'one', mode: 'free', seq: 0})}};
-  vm.runInNewContext(fs.readFileSync(path.join(folder, 'content.js'), 'utf8'),
-    {chrome, MutationObserver: Observer, document, queueMicrotask, console});
-  return {element, elements, handlers, observers, resolve: () => resolvePlay?.(),
+  const chrome = {runtime: {onMessage: {addListener(fn) { listeners.push(fn); },
+      removeListener(fn) { listeners.splice(listeners.indexOf(fn), 1); }},
+    sendMessage: async value => {
+      if (value.type === 'get_policy') return {type: 'policy', epoch: 'one', mode: 'free', seq: 0};
+      reports.push(value);return {ok: true};
+    }}};
+  const context = {chrome, MutationObserver: Observer, document, queueMicrotask, console,
+    innerWidth: 1920, innerHeight: 1080,
+    getComputedStyle: item => ({display: item.hidden ? 'none' : 'block', visibility: 'visible', opacity: '1'}),
+    Date: {now: () => clock},
+    setTimeout: (fn, delay) => { const id = ++nextTimer;timers.set(id, {fn, at: clock + delay});return id; },
+    clearTimeout: id => timers.delete(id)};
+  const compiled = vm.createContext(context);
+  const install = () => vm.runInContext(fs.readFileSync(path.join(folder, 'content.js'), 'utf8'), compiled);
+  install();
+  return {element, elements, handlers, observers, document, reports, install, listeners,
+    dispose: () => context.__cs2ToolkitMedia.dispose(),
+    async advance(ms) {
+      clock += ms;
+      for (const [id, timer] of [...timers]) if (timer.at <= clock) { timers.delete(id); timer.fn(); }
+      await flush();
+    },
+    resolve: () => resolvePlay?.(),
     policy(mode, seq, epoch = 'one') { return new Promise(resolve => listeners[0]({type: 'policy', mode, seq, epoch}, {}, resolve)); }};
 }
 test('late-created media and autoplay are stopped until foreground policy releases the page', async () => {
@@ -187,6 +209,85 @@ test('late-created media and autoplay are stopped until foreground policy releas
   await c.policy('free', 2);
   c.element.paused = false;
   c.handlers.play({target: c.element}); assert(!c.element.paused);
+});
+
+test('watch plays the visible short video instead of a larger hidden preload', async () => {
+  const c = content();await flush();
+  c.element.hidden = true;
+  const current = {...c.element, hidden: false, plays: 0,
+    play() { this.paused = false;this.plays++;return Promise.resolve(); }};
+  c.elements.push(current);
+  await c.policy('watch', 1);
+  assert.equal(c.element.plays, 0);
+  assert.equal(current.plays, 1);
+});
+
+test('offscreen preloads are ignored even when they have the same dimensions', async () => {
+  const c = content();await flush();
+  c.element.getBoundingClientRect = () => ({left: 0, top: -200, right: 100, bottom: -100});
+  const current = {...c.element, getBoundingClientRect: () => ({left: 0, top: 0, right: 100, bottom: 100}),
+    play() { this.paused = false;return Promise.resolve(); }};
+  c.elements.push(current);
+  await c.policy('watch', 1);
+  assert.equal(c.element.plays, 0);
+  assert.equal(current.paused, false);
+});
+
+test('a page hidden during activation starts its visible video after visibility changes', async () => {
+  const c = content();await flush();
+  c.element.play = function() { this.paused = false;this.plays++;return Promise.resolve(); };
+  c.document.visibilityState = 'hidden';
+  const result = await c.policy('watch', 1);
+  assert.equal(result.reason, 'page_hidden');assert.equal(c.element.plays, 0);
+  c.document.visibilityState = 'visible';c.handlers.visibilitychange();await flush();
+  assert.equal(c.element.plays, 1);
+});
+
+test('a site pausing during foreground restoration is retried briefly, then user pause is respected', async () => {
+  const c = content();await flush();
+  c.element.play = function() { this.paused = false;this.plays++;return Promise.resolve(); };
+  await c.policy('watch', 1);
+  c.element.pause();c.handlers.pause({target: c.element});await flush();
+  assert.equal(c.element.plays, 2);
+  await c.advance(2600);
+  c.element.pause();c.handlers.pause({target: c.element});await flush();
+  assert.equal(c.element.plays, 2);
+});
+
+test('returning to the game cancels pending visibility retries and prevents late playback', async () => {
+  const c = content();await flush();
+  c.element.play = () => Promise.reject(Object.assign(Error('blocked'), {name: 'NotAllowedError'}));
+  assert.equal((await c.policy('watch', 1)).reason, 'play_retry_pending');
+  await c.policy('pause', 2);await c.advance(3000);
+  assert(c.element.paused);assert(!c.reports.some(value => value.seq === 1));
+});
+
+test('persistent autoplay rejection is reported instead of claiming a successful playback', async () => {
+  const c = content();await flush();
+  c.element.play = () => Promise.reject(Object.assign(Error('blocked'), {name: 'NotAllowedError'}));
+  const pending = await c.policy('watch', 1);
+  assert.equal(pending.handled, true);
+  await c.advance(2600);
+  const failed = c.reports.find(value => value.reason === 'autoplay_blocked');
+  assert(failed);assert.equal(failed.handled, false);
+});
+
+test('reinjecting the same script is idempotent and disposal removes timers and policy handlers', async () => {
+  const c = content();await flush();
+  c.install();assert.equal(c.listeners.length, 1);
+  c.dispose();assert.equal(c.listeners.length, 0);
+  await c.advance(3000);assert.equal(c.element.plays, 0);
+});
+
+test('a primary tab playback failure cannot be masked by a successful secondary tab', async () => {
+  const bg = await background([{id: 2, windowId: 1, url: 'https://www.bilibili.com/video/1'},
+    {id: 3, windowId: 1, url: 'https://www.bilibili.com/video/2'}],
+    {url: 'https://www.bilibili.com/', primary: 2, tabs: [2, 3]});
+  bg.api.tabs.sendMessage = async id => id === 2 ?
+    {handled: false, reason: 'autoplay_blocked', media_count: 1} : {handled: true, media_count: 1};
+  bg.command({seq: 1, mode: 'watch', open: true});await flush();
+  const result = bg.sent.find(value => value.seq === 1 && value.type === 'ack');
+  assert.equal(result.handled, false);assert.equal(result.reason, 'autoplay_blocked');
 });
 test('stale play completion and stale initial policy cannot undo a new pause', async () => {
   const c = content(); await flush();

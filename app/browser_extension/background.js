@@ -39,9 +39,13 @@ async function applyAll(navigationReady = false) {
   const seq = state.seq;
   const results = await Promise.all(binding.tabs.map(applyTab));
   if (seq !== state.seq) return;
-  const handled = results.length === 0 || results.some(result => result?.handled);
+  const primary = results[binding.tabs.indexOf(binding.primary)];
+  const handled = state.mode === 'watch' && results.length ? !!primary?.handled :
+    results.length === 0 || results.some(result => result?.handled);
+  const reason = state.mode === 'watch' && primary?.reason ? primary.reason :
+    handled ? 'tab_policy_applied' : 'tab_not_ready';
   send({type: 'ack', seq, handled, navigation_ready: navigationReady,
-    reason: handled ? 'tab_policy_applied' : 'tab_not_ready',
+    reason,
     media_count: results.reduce((sum, result) => sum + (result?.media_count || 0), 0)});
 }
 async function command(next) {
@@ -200,6 +204,14 @@ api.runtime.onMessage.addListener((message, sender, respond) => {
     if (message.type === 'get_policy' && sender.tab) {
       return {type: 'policy', seq: state.seq,
         mode: P.sameSite(sender.tab.url, state.url) ? tabMode(sender.tab.id) : 'free', epoch: state.epoch};
+    }
+    if (message.type === 'policy_result' && sender.tab && sender.tab.id === binding.primary
+        && P.sameSite(sender.tab.url, state.url) && message.seq === state.seq
+        && message.epoch === state.epoch && state.mode === 'watch') {
+      send({type: 'ack', seq: state.seq, handled: !!message.handled,
+        reason: String(message.reason || 'tab_policy_applied').slice(0, 64),
+        media_count: Number(message.media_count) || 0});
+      return {ok: true};
     }
     if (message.type === 'status' && !sender.tab) return {ready, state, version: api.runtime.getManifest().version};
     if (message.type === 'bind' && !sender.tab) {
