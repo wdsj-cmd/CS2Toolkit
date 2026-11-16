@@ -86,6 +86,10 @@ class MusicBoxController(QObject):
         self.clock_monitor = RoundClockMonitor(self)
         self.clock_monitor.sampled.connect(self._on_round_clock)
         self.clock_monitor.resync_requested.connect(self._on_clock_resync)
+        if hasattr(self.clock_monitor, 'pause_sampled'):
+            self.clock_monitor.pause_sampled.connect(self._on_pause_visual)
+        if hasattr(self.clock_monitor, 'pause_diagnostic'):
+            self.clock_monitor.pause_diagnostic.connect(lambda details: self.diagnostic.emit('music_timeout_detection', details))
         self.clock_monitor.status_changed.connect(lambda text: self.diagnostic.emit('music_round_clock_status', {'status': text}))
         self.save_timer = QTimer(self)
         self.save_timer.setSingleShot(True)
@@ -159,13 +163,30 @@ class MusicBoxController(QObject):
         self._update_clock_context()
 
     def _update_clock_context(self):
+        key = self.engine.map_name, self.engine.round_number
+        received = self._last_gsi if self._last_gsi is not None else time.monotonic() - 4
         eligible = (self.enabled and not self._closed and self._clock_map_live and not self._clock_blocked
                   and not self._clock_menu and not self._team_menu_open and self.engine.phase == 'live'
                   and not self.engine.round_paused and self.engine.bomb_state not in ('planted', 'defusing'))
-        self.clock_monitor.set_context((self.engine.map_name, self.engine.round_number),
-            eligible and self.engine.round_deadline is None,
-            self._last_gsi if self._last_gsi is not None else time.monotonic() - 4,
+        self.clock_monitor.set_context(key, eligible and self.engine.round_deadline is None, received,
             watch=eligible and self.engine.round_clock_source == 'hud')
+        if hasattr(self.clock_monitor, 'set_pause_context'):
+            pause_watch = bool(self.enabled and not self._closed and self._clock_map_live
+                and not self._clock_blocked and not self._clock_menu and not self._team_menu_open
+                and self.engine.phase == 'freezetime' and not self.engine.pause_gsi_available
+                and self.kit and self.kit['tracks'].get('timeout'))
+            self.clock_monitor.set_pause_context(key, pause_watch, received)
+
+    def _on_pause_visual(self, key, paused, observed_at):
+        if (self._closed or not self.enabled or key != (self.engine.map_name, self.engine.round_number)
+                or not self._clock_map_live or self._clock_blocked or self._clock_menu or self._team_menu_open):
+            return
+        if self.engine.confirm_pause_visual(paused, observed_at):
+            self.diagnostic.emit('music_timeout_visual', {'active': paused})
+            self._update_pause_music()
+            self._update_clock_context()
+            self._update_round_time()
+            self._update_tick_rate()
 
     def _on_clock_resync(self, key):
         if (not self._closed and self.enabled and key == (self.engine.map_name, self.engine.round_number)
@@ -224,7 +245,8 @@ class MusicBoxController(QObject):
                 self._pause_return_choice = self._cue_choice
             self._pause_fade_pending = False
             self._pause_was_played = False
-            self.diagnostic.emit('music_timeout', {'active': True})
+            self.diagnostic.emit('music_timeout', {'active': True, 'source': self.engine.pause_source,
+                                                  'field': self.engine.pause_field})
             if self.enabled and not self.previewing and not self._team_menu_open and self._pause_owns_music():
                 self._play_cue(self._pause_cue)
                 return True

@@ -33,10 +33,12 @@ class Monitor(QObject):
     diagnostic = Signal(str, dict)
     sampled = Signal(object, int, float)
     resync_requested = Signal(object)
+    pause_sampled = Signal(object, bool, float)
     def __init__(self, *args): super().__init__()
     def start(self): pass
     def stop(self): pass
     def set_context(self, *args, **kwargs): pass
+    def set_pause_context(self, *args): self.pause_context = args
 
 
 class Player(QObject):

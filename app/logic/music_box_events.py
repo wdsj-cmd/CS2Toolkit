@@ -23,7 +23,7 @@ SLOTS = (
     EventSlot('main_menu', '主菜单', '大厅或主菜单，适合循环音乐', 0, True, 'mainMenuSong'),
     EventSlot('team_select', '选择队伍', '进入地图选队或按 M 打开队伍菜单时播放，关闭后恢复', 0, True),
     EventSlot('freeze_time', '准备阶段', '每回合购买与准备阶段，参考 15 秒', 15, True, 'freezeSong'),
-    EventSlot('timeout', '比赛暂停', 'GSI 报告比赛暂停时播放，恢复后约 1.2 秒渐弱停止', 0, True),
+    EventSlot('timeout', '比赛暂停', '比赛暂停时播放；补充识别顶部图标及暂停横幅，恢复后渐弱停止', 0, True),
     EventSlot('round_start', '回合开始', '准备结束后播放，参考 5 秒', 5, False, 'startSong'),
     EventSlot('bomb_planted', 'C4 已安放', '安包后播放，参考 30 秒', 30, False, 'bombSong'),
     EventSlot('round_ten_seconds', '回合剩余十秒', '仅跟随游戏实际剩余时间，缺失时不触发', 10, False, 'roundTenSecSong'),
@@ -38,6 +38,8 @@ SLOTS = (
 SLOT_MAP = {slot.key: slot for slot in SLOTS}
 FINISH_BEFORE_SWITCH_EVENTS = frozenset(('round_won', 'round_lost', 'mvp'))
 BOMB_WARNING_EVENTS = frozenset(('bomb_ten_seconds', 'bomb_ten_seconds_self', 'bomb_ten_seconds_other'))
+PAUSE_PHASES = frozenset(('paused', 'timeout_t', 'timeout_ct'))
+COUNTDOWN_PHASES = PAUSE_PHASES | {'freezetime', 'live', 'over', 'warmup', 'bomb', 'defuse'}
 PRIORITY = {'stop': 0, 'main_menu': 10, 'team_select': 15, 'freeze_time': 20, 'timeout': 100, 'round_start': 30, 'death': 40,
             'bomb_planted': 50, 'round_ten_seconds': 60, 'bomb_ten_seconds': 70,
             'bomb_ten_seconds_self': 70, 'bomb_ten_seconds_other': 70,
@@ -101,6 +103,9 @@ class MusicEventEngine:
         self.plant_evidence = {}
         self.round_result = ''
         self.round_paused = False
+        self.pause_source = ''
+        self.pause_field = ''
+        self.pause_gsi_available = False
         self.paused_at = None
         self.round_estimated = self.bomb_estimated = False
         self.round_deadline = self.bomb_deadline = None
@@ -149,6 +154,9 @@ class MusicEventEngine:
         round_number = map_info.get('round')
         if round_number is not None and round_number != self.round_number:
             self.round_paused = False
+            self.pause_source = ''
+            self.pause_field = ''
+            self.pause_gsi_available = False
             self.paused_at = None
             self.ten_played.clear()
             self.round_deadline = self.bomb_deadline = None
@@ -278,6 +286,9 @@ class MusicEventEngine:
             self.selecting_team = True
         if entered_menu:
             self.round_paused = False
+            self.pause_source = ''
+            self.pause_field = ''
+            self.pause_gsi_available = False
             self.paused_at = None
             if self.activity != 'menu' or not self.current_cue or self.current_cue.event != 'main_menu':
                 candidates.append('main_menu')
@@ -358,8 +369,23 @@ class MusicEventEngine:
             self.bomb_state = bomb_state
             countdown = object_node(state.get('phase_countdowns'))
             countdown_phase = countdown.get('phase')
-            if isinstance(countdown_phase, str) and countdown_phase:
-                self.round_paused = countdown_phase in ('paused', 'timeout_t', 'timeout_ct')
+            if isinstance(countdown_phase, str) and countdown_phase in COUNTDOWN_PHASES:
+                self.pause_gsi_available = True
+                self.round_paused = countdown_phase in PAUSE_PHASES
+                self.pause_source = 'gsi' if self.round_paused else ''
+                self.pause_field = 'phase_countdowns'
+            elif any(node.get('phase') in PAUSE_PHASES for node in (round_info, map_info)
+                     if isinstance(node.get('phase'), str)):
+                self.round_paused = self.pause_gsi_available = True
+                self.pause_source = 'gsi'
+                self.pause_field = 'round' if isinstance(phase, str) and phase in PAUSE_PHASES else 'map'
+            elif (self.pause_source == 'gsi' and self.pause_field in ('round', 'map')
+                    and object_node(state.get(self.pause_field)).get('phase') in ('live', 'freezetime', 'over', 'gameover', 'warmup')):
+                self.round_paused = self.pause_gsi_available = False
+                self.pause_source = self.pause_field = ''
+            elif self.pause_source == 'hud' and phase and phase != 'freezetime':
+                self.round_paused = False
+                self.pause_source = self.pause_field = ''
             if self.round_paused and self.paused_at is None:
                 self.paused_at = now
                 self.round_deadline = None
@@ -396,6 +422,22 @@ class MusicEventEngine:
         if bomb_state in ('defused', 'exploded') and self.current_cue and self.current_cue.event.startswith('bomb_'):
             return self._emit('stop', now)
         return None
+
+    def confirm_pause_visual(self, paused, observed_at):
+        now = self.clock()
+        observed_at = number(observed_at)
+        if (not isinstance(paused, bool) or observed_at is None or not 0 <= now-observed_at <= .75
+                or self.last_update is None or now-self.last_update > 3 or not self.map_name
+                or self.phase != 'freezetime' or self.pause_gsi_available or paused == self.round_paused):
+            return False
+        self.round_paused = paused
+        self.pause_source = 'hud' if paused else ''
+        self.pause_field = 'visual' if paused else ''
+        self.paused_at = now if paused else None
+        if paused:
+            self.round_deadline = None
+            self.round_clock_source = ''
+        return True
 
     def confirm_round_clock(self, seconds, observed_at):
         now = self.clock()
