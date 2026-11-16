@@ -56,6 +56,7 @@ class MusicBoxController(QObject):
         self._t_bomb_protected = False
         self._t_bomb_override_round = None
         self._t_bomb_loss_started = False
+        self._t_bomb_exploded = False
         self._pending_result_cues = []
         self._pending_cue = None
         self._last_random_clip = {}
@@ -283,6 +284,11 @@ class MusicBoxController(QObject):
         self._last_gsi = time.monotonic()
         cue = self.engine.process(state)
         self._sync_t_bomb_override_round()
+        if self._t_bomb_override_round is not None:
+            # The round summary can confirm the explosion before a detailed
+            # bomb node catches up. Retain it for a later sparse MVP packet.
+            self._t_bomb_exploded |= (object_node(state.get('round')).get('bomb') == 'exploded'
+                                      or object_node(state.get('bomb')).get('state') == 'exploded')
         map_info = object_node(state.get('map'))
         player = object_node(state.get('player'))
         if 'phase' in map_info:
@@ -396,6 +402,7 @@ class MusicBoxController(QObject):
         self._t_bomb_protected = False
         self._t_bomb_override_round = None
         self._t_bomb_loss_started = False
+        self._t_bomb_exploded = False
         self._pending_result_cues.clear()
         self._pending_cue = None
 
@@ -409,12 +416,16 @@ class MusicBoxController(QObject):
             else:
                 self._t_bomb_override_round = None
                 self._t_bomb_loss_started = False
+                self._t_bomb_exploded = False
         elif (self.engine.phase == 'freezetime'
               or (self.engine.phase == 'live' and self.engine.round_number != scope[1])):
             # An incremented round counter in an 'over' packet still belongs
             # to the old result. Reset result suppression when play restarts.
             self._t_bomb_override_round = None
             self._t_bomb_loss_started = False
+            self._t_bomb_exploded = False
+        elif self.engine.bomb_state == 'exploded':
+            self._t_bomb_exploded = True
 
     def _play_cue(self, cue, resume=False, repeat=False, round_result=None):
         self._sync_t_bomb_override_round()
@@ -424,9 +435,13 @@ class MusicBoxController(QObject):
                 if self._t_bomb_loss_started:
                     return
                 cue = MusicCue('round_lost', cue.started)
-            else:
+            elif self._t_bomb_exploded:
                 self.diagnostic.emit('music_cue_replaced_by_t_c4', {'cue': cue.event})
                 return
+            else:
+                # Winning by eliminating CTs must immediately use the normal
+                # victory/MVP path, even if a protected warning is still playing.
+                self._clear_playback_protection()
         if cue.event == 'round_lost' and (self._t_bomb_protected or self._t_bomb_override_round is not None):
             if self._t_bomb_override_round is not None and self._t_bomb_loss_started:
                 return
@@ -497,6 +512,7 @@ class MusicBoxController(QObject):
                 if t_bomb:
                     self._t_bomb_override_round = (self.engine.map_name, self.engine.round_number)
                     self._t_bomb_loss_started = False
+                    self._t_bomb_exploded = False
             if cue.event == 'team_select':
                 self.player.stop()
             clip['fade_ms'] = 15 if cue.event == 'team_select' else 50 if cue.event.startswith('bomb_') else 180
@@ -523,6 +539,7 @@ class MusicBoxController(QObject):
                 self._t_bomb_protected = False
                 self._t_bomb_override_round = None
                 self._t_bomb_loss_started = False
+                self._t_bomb_exploded = False
                 self._play_deferred_cue()
         except (OSError, ValueError) as exc:
             self._failed(str(exc))
@@ -580,6 +597,7 @@ class MusicBoxController(QObject):
         self._t_bomb_protected = False
         self._t_bomb_override_round = None
         self._t_bomb_loss_started = False
+        self._t_bomb_exploded = False
         self._audio_request = None
         self.player.stop()
         self.previewing = False

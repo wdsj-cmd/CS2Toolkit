@@ -28,7 +28,7 @@ class TerroristBombOverrideTests(unittest.TestCase):
             self.controller.reload_library()
 
     def packet(self, phase='live', team='T', bomb='', remaining=None, winner=None,
-               mvps=0, round_number=1, player=SELF, activity='playing', map_name='de_dust2'):
+               mvps=0, round_number=1, player=SELF, activity='playing', map_name='de_dust2', round_bomb=''):
         state = {'provider': {'steamid': SELF},
             'map': {'name': map_name, 'phase': 'live', 'round': round_number},
             'round': {'phase': phase}, 'player': {'steamid': player, 'team': team,
@@ -39,6 +39,8 @@ class TerroristBombOverrideTests(unittest.TestCase):
             state['bomb']['countdown'] = str(remaining)
         if winner:
             state['round']['win_team'] = winner
+        if round_bomb:
+            state['round']['bomb'] = round_bomb
         self.controller.process_gsi(state)
         return state
 
@@ -106,7 +108,7 @@ class TerroristBombOverrideTests(unittest.TestCase):
     def test_finished_warning_still_replaces_late_result_for_its_round_only(self):
         self.arm()
         self.player.finished.emit()
-        self.packet('over', winner='T', mvps=1)
+        self.packet('over', bomb='exploded', winner='T', mvps=1)
         self.assertEqual(self.names(), ['bomb_ten_seconds'])
         self.packet('freezetime', mvps=1, round_number=2)
         self.packet('over', winner='T', mvps=2, round_number=2)
@@ -116,6 +118,53 @@ class TerroristBombOverrideTests(unittest.TestCase):
         self.arm(duration=0, loop=True)
         clip = self.player.calls[-1][1]
         self.assertEqual((clip['duration'], clip['loop']), (0, False))
+
+    def test_elimination_win_immediately_releases_all_three_warning_tracks(self):
+        for event in BOMB_WARNING_EVENTS:
+            with self.subTest(event=event):
+                self.arm(event)
+                self.packet('over', bomb='planted', winner='T')
+                self.assertEqual(self.names(), [event, 'round_won'])
+                self.assertFalse(self.controller._t_bomb_protected)
+                self.assertIsNone(self.controller._t_bomb_override_round)
+
+    def test_elimination_mvp_in_same_packet_immediately_replaces_warning(self):
+        self.arm()
+        self.packet('over', bomb='planted', winner='T', mvps=1)
+        self.assertEqual(self.names(), ['bomb_ten_seconds', 'mvp'])
+
+    def test_elimination_win_does_not_suppress_a_later_mvp(self):
+        self.arm()
+        self.assign('round_won', protected=False)
+        self.packet('over', bomb='planted', winner='T')
+        self.packet('over', winner='T', mvps=1)
+        self.assertEqual(self.names(), ['bomb_ten_seconds', 'round_won', 'mvp'])
+
+    def test_unknown_bomb_outcome_uses_normal_result_instead_of_assuming_explosion(self):
+        self.arm()
+        self.packet('over', winner='T', mvps=1)
+        self.assertEqual(self.names(), ['bomb_ten_seconds', 'mvp'])
+
+    def test_explosion_is_retained_for_a_later_mvp_packet_without_bomb_fields(self):
+        self.arm()
+        self.packet('over', bomb='exploded', winner='T')
+        self.packet('over', winner='T', mvps=1)
+        self.assertEqual(self.names(), ['bomb_ten_seconds'])
+        self.assertTrue(self.controller._t_bomb_exploded)
+
+    def test_round_summary_explosion_takes_precedence_over_a_lagging_detailed_node(self):
+        self.arm()
+        self.packet('over', bomb='planted', round_bomb='exploded', winner='T', mvps=1)
+        self.assertEqual(self.names(), ['bomb_ten_seconds'])
+
+    def test_explosion_from_previous_round_does_not_replace_next_round_elimination_result(self):
+        self.arm()
+        self.packet('over', bomb='exploded', winner='T')
+        self.packet('freezetime', round_number=2)
+        self.player.finished.emit()
+        self.packet(bomb='planted', remaining=9, round_number=2)
+        self.packet('over', bomb='planted', winner='T', mvps=1, round_number=2)
+        self.assertEqual(self.names()[-1], 'mvp')
 
     def test_cached_local_t_team_is_used_while_observing_a_ct_player(self):
         self.arm()
@@ -211,6 +260,7 @@ class TerroristBombOverrideTests(unittest.TestCase):
         records = []
         self.controller.diagnostic.connect(lambda name, details: records.append(details['cue']) if name == 'music_cue' else None)
         self.controller._play_cue(MusicCue('bomb_ten_seconds', time.monotonic()))
+        self.controller.engine.bomb_state = 'exploded'
         self.controller._play_cue(MusicCue('round_won', time.monotonic()))
         self.controller._play_cue(MusicCue('freeze_time', time.monotonic()))
         self.assertEqual(records, ['bomb_ten_seconds'])
