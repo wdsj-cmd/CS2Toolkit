@@ -23,6 +23,7 @@ SLOTS = (
     EventSlot('main_menu', '主菜单', '大厅或主菜单，适合循环音乐', 0, True, 'mainMenuSong'),
     EventSlot('team_select', '选择队伍', '进入地图选队或按 M 打开队伍菜单时播放，关闭后恢复', 0, True),
     EventSlot('freeze_time', '准备阶段', '每回合购买与准备阶段，参考 15 秒', 15, True, 'freezeSong'),
+    EventSlot('timeout', '比赛暂停', 'GSI 报告比赛暂停时播放，恢复后约 1.2 秒渐弱停止', 0, True),
     EventSlot('round_start', '回合开始', '准备结束后播放，参考 5 秒', 5, False, 'startSong'),
     EventSlot('bomb_planted', 'C4 已安放', '安包后播放，参考 30 秒', 30, False, 'bombSong'),
     EventSlot('round_ten_seconds', '回合剩余十秒', '仅跟随游戏实际剩余时间，缺失时不触发', 10, False, 'roundTenSecSong'),
@@ -37,7 +38,7 @@ SLOTS = (
 SLOT_MAP = {slot.key: slot for slot in SLOTS}
 FINISH_BEFORE_SWITCH_EVENTS = frozenset(('round_won', 'round_lost', 'mvp'))
 BOMB_WARNING_EVENTS = frozenset(('bomb_ten_seconds', 'bomb_ten_seconds_self', 'bomb_ten_seconds_other'))
-PRIORITY = {'stop': 0, 'main_menu': 10, 'team_select': 15, 'freeze_time': 20, 'round_start': 30, 'death': 40,
+PRIORITY = {'stop': 0, 'main_menu': 10, 'team_select': 15, 'freeze_time': 20, 'timeout': 100, 'round_start': 30, 'death': 40,
             'bomb_planted': 50, 'round_ten_seconds': 60, 'bomb_ten_seconds': 70,
             'bomb_ten_seconds_self': 70, 'bomb_ten_seconds_other': 70,
             'round_won': 80, 'round_lost': 80, 'mvp': 90}
@@ -147,6 +148,8 @@ class MusicEventEngine:
             self.map_name = map_name
         round_number = map_info.get('round')
         if round_number is not None and round_number != self.round_number:
+            self.round_paused = False
+            self.paused_at = None
             self.ten_played.clear()
             self.round_deadline = self.bomb_deadline = None
             self.round_clock_source = ''
@@ -274,6 +277,8 @@ class MusicEventEngine:
             # Incomplete packets while the menu is open must not restart it.
             self.selecting_team = True
         if entered_menu:
+            self.round_paused = False
+            self.paused_at = None
             if self.activity != 'menu' or not self.current_cue or self.current_cue.event != 'main_menu':
                 candidates.append('main_menu')
             self.phase = ''
@@ -352,7 +357,9 @@ class MusicEventEngine:
                 self.phase = phase
             self.bomb_state = bomb_state
             countdown = object_node(state.get('phase_countdowns'))
-            self.round_paused = countdown.get('phase') in ('paused', 'timeout_t', 'timeout_ct')
+            countdown_phase = countdown.get('phase')
+            if isinstance(countdown_phase, str) and countdown_phase:
+                self.round_paused = countdown_phase in ('paused', 'timeout_t', 'timeout_ct')
             if self.round_paused and self.paused_at is None:
                 self.paused_at = now
                 self.round_deadline = None

@@ -28,6 +28,7 @@ class MusicBoxPlayer(QObject):
     loop_finished = Signal()
     failed = Signal(str)
     started = Signal()
+    faded_out = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -44,6 +45,7 @@ class MusicBoxPlayer(QObject):
         self._handoff_pending = False
         self._handoff_queued = False
         self._pending_previous = -1
+        self._fading_out = False
         self.buffer_outputs = [QAudioBufferOutput(self) if QAudioBufferOutput else None for _ in self.players]
         for index, player in enumerate(self.players):
             player.setAudioOutput(self.outputs[index])
@@ -57,6 +59,8 @@ class MusicBoxPlayer(QObject):
 
     def set_volume(self, value):
         self.master_volume = max(0, min(100, int(value)))
+        if self._fading_out:
+            return
         if self.active >= 0 and self.clip:
             self.fades[self.active].stop()
             self.outputs[self.active].setVolume(self._volume())
@@ -70,6 +74,7 @@ class MusicBoxPlayer(QObject):
             self.failed.emit('音频文件已丢失，请重新选择切片')
             return False
         self._token += 1
+        self._fading_out = False
         token = self._token
         previous = self.active
         current = (previous + 1) % 2
@@ -130,7 +135,7 @@ class MusicBoxPlayer(QObject):
         if index != self.active or not self.clip or self.players[index].source() != self._source:
             return
         player = self.players[index]
-        if status in (QMediaPlayer.LoadedMedia, QMediaPlayer.BufferedMedia) and not self._loaded:
+        if status in (QMediaPlayer.LoadedMedia, QMediaPlayer.BufferedMedia) and not self._loaded and not self._fading_out:
             self._loaded = True
             start = round(self.clip.get('start', 0) * 1000)
             if player.duration() > 0 and start >= player.duration():
@@ -159,6 +164,10 @@ class MusicBoxPlayer(QObject):
     def _clip_end(self):
         if self._ended or self.active < 0 or not self.clip:
             return
+        if self._fading_out:
+            self.stop()
+            self.faded_out.emit()
+            return
         if self.clip.get('loop'):
             token = self._token
             self.loop_finished.emit()
@@ -177,8 +186,33 @@ class MusicBoxPlayer(QObject):
             self.stop()
             self.failed.emit(message or '音频无法播放，请尝试 WAV 或 MP3 格式')
 
+    def fade_stop(self, milliseconds=1200):
+        if self.active < 0 or not self.clip or not self._loaded:
+            self.stop()
+            return False
+        self._token += 1
+        token = self._token
+        self._fading_out = True
+        self._handoff_pending = self._handoff_queued = False
+        self._pending_previous = -1
+        milliseconds = max(1, int(milliseconds))
+        for fade, output in zip(self.fades, self.outputs):
+            fade.stop()
+            fade.setDuration(milliseconds)
+            fade.setStartValue(output.volume())
+            fade.setEndValue(0)
+            fade.start()
+        QTimer.singleShot(milliseconds, self, lambda: self._finish_fade(token))
+        return True
+
+    def _finish_fade(self, token):
+        if token == self._token and self._fading_out:
+            self.stop()
+            self.faded_out.emit()
+
     def stop(self):
         self._token += 1
+        self._fading_out = False
         self.active = -1
         self.clip = None
         self._source = QUrl()

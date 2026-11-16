@@ -56,18 +56,7 @@ class ClipDialog(MessageBoxBase):
         random_row.addWidget(self.random_play)
         self.viewLayout.addLayout(random_row)
         self.finish_before_switch = None
-        if event in FINISH_BEFORE_SWITCH_EVENTS:
-            finish_row = QHBoxLayout()
-            finish_row.addWidget(BodyLabel('完整播放后切换', self), 1)
-            self.finish_before_switch = SwitchButton(self)
-            self.finish_before_switch.setOnText('播完当前切片再切换')
-            self.finish_before_switch.setOffText('允许新事件打断')
-            self.finish_before_switch.setChecked(options['finish_before_switch'])
-            finish_row.addWidget(self.finish_before_switch)
-            self.viewLayout.addLayout(finish_row)
-            finish_hint = CaptionLabel('按设置时长完整播放一次；时长为 0 时播完剩余音频。停止播放和手动试听仍立即生效。', self)
-            finish_hint.setWordWrap(True)
-            self.viewLayout.addWidget(finish_hint)
+        self.finish_options = None
         self.t_round_end_override = None
         if event in BOMB_WARNING_EVENTS:
             t_row = QHBoxLayout()
@@ -78,9 +67,30 @@ class ClipDialog(MessageBoxBase):
             self.t_round_end_override.setChecked(options['t_round_end_override'])
             t_row.addWidget(self.t_round_end_override)
             self.viewLayout.addLayout(t_row)
-            t_hint = CaptionLabel('仅自己为 T 方且 C4 爆炸获胜时延续，按设置时长播完一次（0 为剩余音频）；提前消灭 CT 切换胜利/MVP，失败切换失败音乐。', self)
+            t_hint = CaptionLabel('仅自己为 T 方且 C4 爆炸获胜时，用当前十秒曲目代替胜利/MVP；提前消灭 CT 或回合失败时，立即切换对应音乐。', self)
             t_hint.setWordWrap(True)
             self.viewLayout.addWidget(t_hint)
+        if event in FINISH_BEFORE_SWITCH_EVENTS or event in BOMB_WARNING_EVENTS:
+            self.finish_options = QWidget(self)
+            finish_layout = QVBoxLayout(self.finish_options)
+            finish_layout.setContentsMargins(0, 0, 0, 0)
+            finish_row = QHBoxLayout()
+            finish_row.addWidget(BodyLabel('完整播放后切换', self.finish_options), 1)
+            self.finish_before_switch = SwitchButton(self.finish_options)
+            self.finish_before_switch.setOnText('播完当前切片再切换')
+            self.finish_before_switch.setOffText('允许新事件打断')
+            self.finish_before_switch.setChecked(options['finish_before_switch'])
+            finish_row.addWidget(self.finish_before_switch)
+            finish_layout.addLayout(finish_row)
+            text = ('开启后等待切片播完再切换准备阶段等后续音乐，0 秒为剩余完整音频。提前消灭 CT、回合失败和手动停止仍立即切换。'
+                    if event in BOMB_WARNING_EVENTS else
+                    '按设置时长完整播放一次；时长为 0 时播完剩余音频。停止播放和手动试听仍立即生效。')
+            finish_hint = CaptionLabel(text, self.finish_options)
+            finish_hint.setWordWrap(True)
+            finish_layout.addWidget(finish_hint)
+            self.viewLayout.addWidget(self.finish_options)
+            if self.t_round_end_override is not None:
+                self.finish_options.setVisible(self.t_round_end_override.isChecked())
         self.list = ListWidget(self)
         self.list.setFixedHeight(126)
         self.viewLayout.addWidget(self.list)
@@ -134,6 +144,15 @@ class ClipDialog(MessageBoxBase):
         self.loop.checkedChanged.connect(self._store)
         self.finished.connect(lambda _: controller.end_preview())
         self._refresh(options['selected_index'])
+        if self.t_round_end_override is not None:
+            self.t_round_end_override.checkedChanged.connect(self._set_t_finish_visible)
+            self._set_t_finish_visible(self.t_round_end_override.isChecked())
+
+    def _set_t_finish_visible(self, enabled):
+        self.finish_options.setVisible(enabled)
+        # Keep the extra setting inside the usual 750x780 application window;
+        # the audio list remains scrollable when the child option is shown.
+        self.list.setFixedHeight(80 if enabled else 126)
 
     def playback_options(self):
         return {'random': self.random_play.isChecked(), 'selected_index': max(0, self.current),

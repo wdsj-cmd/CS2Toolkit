@@ -12,7 +12,7 @@ from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QApplication, QWidget
 
 from app.logic.music_box_controller import MusicBoxController
-from app.logic.music_box_events import MusicCue, FINISH_BEFORE_SWITCH_EVENTS, SLOTS
+from app.logic.music_box_events import MusicCue, FINISH_BEFORE_SWITCH_EVENTS, BOMB_WARNING_EVENTS, SLOTS
 from app.logic.music_box_library import event_options, validate_event_options
 from app.logic.music_box_player import MusicBoxPlayer
 from app.ui.pages.music_box_page import ClipDialog
@@ -178,16 +178,20 @@ class FinishBeforeSwitchTests(unittest.TestCase):
         self.assertFalse(validate_event_options(None, 1)['finish_before_switch'])
         with self.assertRaises(ValueError): validate_event_options({'finish_before_switch': 'true'}, 1)
 
-    def test_only_three_result_dialogs_have_independent_switches(self):
+    def test_results_and_optional_t_warnings_have_independent_finish_switches(self):
         parent = QWidget()
         self.addCleanup(parent.close)
         for slot in SLOTS:
             dialog = ClipDialog(self.controller, slot.key, parent)
-            self.assertEqual(dialog.finish_before_switch is not None, slot.key in FINISH_BEFORE_SWITCH_EVENTS)
-            if dialog.finish_before_switch is not None:
+            self.assertEqual(dialog.finish_before_switch is not None,
+                             slot.key in FINISH_BEFORE_SWITCH_EVENTS or slot.key in BOMB_WARNING_EVENTS)
+            if slot.key in FINISH_BEFORE_SWITCH_EVENTS:
                 self.assertTrue(dialog.finish_before_switch.isChecked())
                 dialog.finish_before_switch.setChecked(False)
                 self.assertFalse(dialog.playback_options()['finish_before_switch'])
+            elif slot.key in BOMB_WARNING_EVENTS:
+                self.assertTrue(dialog.finish_options.isHidden())
+                self.assertFalse(dialog.finish_before_switch.isChecked())
             dialog.close(); dialog.deleteLater()
 
     def test_real_player_duration_and_end_of_file_release_deferred_event(self):

@@ -44,11 +44,11 @@ class TerroristBombOverrideTests(unittest.TestCase):
         self.controller.process_gsi(state)
         return state
 
-    def arm(self, event='bomb_ten_seconds', team='T', override=True, duration=12, loop=False):
+    def arm(self, event='bomb_ten_seconds', team='T', override=True, duration=12, loop=False, finish=True):
         self.controller.stop(); self.controller.engine.reset(); self.player.calls.clear()
         self.now = 100.
         self.controller.engine.clock = lambda: self.now
-        self.assign(event, protected=False, override=override, duration=duration, loop=loop)
+        self.assign(event, protected=finish, override=override, duration=duration, loop=loop)
         self.packet(team=team)
         if event != 'bomb_ten_seconds':
             state = {'provider': {'steamid': SELF}, 'map': {'name': 'de_dust2', 'phase': 'live', 'round': 1},
@@ -238,8 +238,17 @@ class TerroristBombOverrideTests(unittest.TestCase):
             self.assertEqual(dialog.t_round_end_override is not None, slot.key in BOMB_WARNING_EVENTS)
             if dialog.t_round_end_override:
                 self.assertFalse(dialog.t_round_end_override.isChecked())
+                self.assertTrue(dialog.finish_options.isHidden())
                 dialog.t_round_end_override.setChecked(True)
+                self.assertFalse(dialog.finish_options.isHidden())
+                self.assertFalse(dialog.finish_before_switch.isChecked())
+                dialog.finish_before_switch.setChecked(True)
                 self.assertTrue(dialog.playback_options()['t_round_end_override'])
+                self.assertTrue(dialog.playback_options()['finish_before_switch'])
+                dialog.t_round_end_override.setChecked(False)
+                self.assertTrue(dialog.finish_options.isHidden())
+                dialog.t_round_end_override.setChecked(True)
+                self.assertTrue(dialog.finish_before_switch.isChecked())
             dialog.close(); dialog.deleteLater()
 
     def test_real_qt_completion_plays_pending_preparation_after_a_full_warning(self):
@@ -258,7 +267,7 @@ class TerroristBombOverrideTests(unittest.TestCase):
         self.controller.engine.map_name = 'de_dust2'
         self.controller.engine.round_number = 1
         self.controller.engine.phase = 'live'
-        self.assign('bomb_ten_seconds', protected=False, override=True, duration=.2)
+        self.assign('bomb_ten_seconds', protected=True, override=True, duration=.2)
         records = []
         self.controller.diagnostic.connect(lambda name, details: records.append(details['cue']) if name == 'music_cue' else None)
         self.controller._play_cue(MusicCue('bomb_ten_seconds', time.monotonic()))
@@ -269,6 +278,64 @@ class TerroristBombOverrideTests(unittest.TestCase):
         deadline = time.monotonic() + 3
         while len(records) < 2 and time.monotonic() < deadline: APP.processEvents(); time.sleep(.005)
         self.assertEqual(records, ['bomb_ten_seconds', 'freeze_time'])
+
+    def test_continuation_without_finish_replaces_results_but_switches_at_preparation(self):
+        for event in BOMB_WARNING_EVENTS:
+            with self.subTest(event=event):
+                self.arm(event, finish=False)
+                self.assertIsNone(self.controller._protected_cue)
+                self.packet('over', bomb='exploded', winner='T', mvps=1)
+                self.assertEqual(self.names(), [event])
+                self.packet('freezetime', mvps=1, round_number=2)
+                self.assertEqual(self.names(), [event, 'freeze_time'])
+                self.assertFalse(self.controller._t_bomb_protected)
+
+    def test_continuation_without_finish_survives_explosion_before_winner_packet(self):
+        self.arm(finish=False)
+        stopped = self.player.stops
+        self.packet(bomb='exploded')
+        self.packet('over', winner='T', mvps=1)
+        self.assertEqual(self.names(), ['bomb_ten_seconds'])
+        self.assertEqual(self.player.stops, stopped)
+
+    def test_without_finish_elimination_and_failure_still_interrupt_immediately(self):
+        for winner, expected in (('T', 'round_won'), ('CT', 'round_lost')):
+            with self.subTest(winner=winner):
+                self.arm(finish=False)
+                self.packet('over', bomb='planted' if winner == 'T' else 'defused', winner=winner)
+                self.assertEqual(self.names(), ['bomb_ten_seconds', expected])
+
+    def test_finish_flag_alone_does_not_protect_ct_or_disabled_t_continuation(self):
+        for team, enabled in (('CT', True), ('T', False)):
+            with self.subTest(team=team, enabled=enabled):
+                self.arm(team=team, override=enabled, finish=True)
+                self.assertIsNone(self.controller._protected_cue)
+                self.packet('freezetime', team=team, round_number=2)
+                self.assertEqual(self.names()[-1], 'freeze_time')
+
+    def test_generic_fallback_uses_both_generic_switches(self):
+        self.arm(finish=False)
+        self.controller.stop()
+        self.controller._play_cue(MusicCue('bomb_ten_seconds_other', self.now + 1))
+        self.assertTrue(self.controller._t_bomb_protected)
+        self.assertIsNone(self.controller._protected_cue)
+
+    def test_child_finish_setting_survives_save_reopen_and_export(self):
+        parent = QWidget(); self.addCleanup(parent.close)
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                self.assign('bomb_ten_seconds', protected=enabled, override=True)
+                dialog = ClipDialog(self.controller, 'bomb_ten_seconds', parent)
+                self.assertFalse(dialog.finish_options.isHidden())
+                self.assertEqual(dialog.finish_before_switch.isChecked(), enabled)
+                self.controller.library.assign(self.kit['id'], 'bomb_ten_seconds', dialog.clips, dialog.playback_options())
+                dialog.close(); dialog.deleteLater()
+                output = Path(self.temp.name)/'child-option.zip'
+                self.controller.library.export(self.kit['id'], output)
+                imported = self.controller.library.import_zip(output)
+                options = event_options(imported, 'bomb_ten_seconds')
+                self.assertTrue(options['t_round_end_override'])
+                self.assertEqual(options['finish_before_switch'], enabled)
 
 
 if __name__ == '__main__': unittest.main()
