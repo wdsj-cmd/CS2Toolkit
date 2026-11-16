@@ -21,21 +21,14 @@ class GoPetManager(QObject):
         self.is_flashed = False
         self.is_dead = False
         self.health = 100
-        self.bomb_planted = False
         self.phase = ""
         
         self.priority_map = {
-            "death": 100,
-            "mvp": 95,
-            "win": 90,
-            "loss": 90,
-            "bomb": 85,
             "flashed": 80,
             "low_health": 60,
             "kill": 70,
             "rich": 40,
             "poor": 40,
-            "freeze": 30,
             "normal": 0
         }
         
@@ -59,7 +52,7 @@ class GoPetManager(QObject):
         if isinstance(events_list, list):
             self.events_config = {}
             for e in events_list:
-                if isinstance(e, dict) and 'type' in e:
+                if isinstance(e, dict) and e.get('type') in self.priority_map:
                     self.events_config[e['type']] = e
         else:
             self.events_config = {}
@@ -124,7 +117,7 @@ class GoPetManager(QObject):
         return path
         
     def _trigger_event(self, event_type, transient=False):
-        if not self.enabled:
+        if not self.enabled or event_type not in self.priority_map:
             return
             
         priority = self.priority_map.get(event_type, 0)
@@ -156,14 +149,10 @@ class GoPetManager(QObject):
         # Re-evaluate persistent state
         self.current_priority = -1 # Reset priority to allow re-evaluation
         
-        if self.is_dead:
-            self._trigger_event("death")
-        elif self.is_flashed:
+        if self.is_flashed and not self.is_dead:
             self._trigger_event("flashed")
-        elif self._is_low_health_active():
+        elif self._is_low_health_active() and not self.is_dead:
             self._trigger_event("low_health")
-        elif self.phase == "freezetime":
-            self._trigger_event("freeze")
         else:
             self._trigger_event("normal")
 
@@ -192,12 +181,7 @@ class GoPetManager(QObject):
 
         # Phase tracking
         if phase != self.phase:
-            previous_phase = self.phase
             self.phase = phase
-            if phase in ("freezetime", "over"):
-                self.bomb_planted = False
-            if previous_phase == "over" and hasattr(self, '_round_over_triggered'):
-                del self._round_over_triggered
             self._reset_to_persistent_state()
         
         # Health & Death
@@ -205,7 +189,7 @@ class GoPetManager(QObject):
         was_low_health = self._is_low_health_active()
         if health == 0 and not self.is_dead:
             self.is_dead = True
-            self._trigger_event("death")
+            self._reset_to_persistent_state()
         elif health > 0 and self.is_dead:
             self.is_dead = False
             self._reset_to_persistent_state()
@@ -224,17 +208,6 @@ class GoPetManager(QObject):
             self.is_flashed = False
             self._reset_to_persistent_state()
             
-        # Bomb
-        bomb_data = game_state.get('bomb', {})
-        bomb_state = round_info.get('bomb', '') or bomb_data.get('state', '')
-        if bomb_state == 'planted':
-            if not self.bomb_planted:
-                self.bomb_planted = True
-                self._trigger_event("bomb", transient=True)
-        elif self.bomb_planted:
-            self.bomb_planted = False
-            self._reset_to_persistent_state()
-            
         # Kills
         kills = match_stats.get('kills', 0)
         if not hasattr(self, '_last_kills'):
@@ -251,28 +224,6 @@ class GoPetManager(QObject):
             elif "poor" in self.events_config and money <= self.events_config["poor"].get("threshold", 2000):
                 self._trigger_event("poor", transient=True)
                 
-        # MVP / Win / Loss
-        current_mvps = match_stats.get('mvps', 0)
-        if not hasattr(self, '_last_mvps'):
-            self._last_mvps = current_mvps
-
-        if phase == "over" and not hasattr(self, '_round_over_triggered'):
-            self._round_over_triggered = True
-            win_team = round_info.get('win_team')
-            my_team = player.get('team')
-            won_round = win_team == my_team
-            got_mvp = current_mvps > self._last_mvps
-            if won_round and got_mvp and "mvp" in self.events_config:
-                self._trigger_event("mvp", transient=True)
-            elif won_round:
-                self._trigger_event("win", transient=True)
-            else:
-                self._trigger_event("loss", transient=True)
-        elif phase != "over":
-            if hasattr(self, '_round_over_triggered'):
-                del self._round_over_triggered
-        self._last_mvps = current_mvps
-
         # main_window processes visual_handler before go_pet_manager.
         # Re-raise the pet overlay at the end of each GSI frame so flash/death
         # overlays do not cover the pet.

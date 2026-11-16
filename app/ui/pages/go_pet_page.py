@@ -33,14 +33,8 @@ PET_EVENT_OPTIONS = [
     ("low_health", "血量低于指定值"),
     ("flashed", "被闪白"),
     ("kill", "击杀"),
-    ("death", "被击杀"),
-    ("bomb", "炸弹安放"),
     ("rich", "经济高于指定值"),
     ("poor", "经济低于指定值"),
-    ("win", "回合胜利"),
-    ("loss", "回合失败"),
-    ("mvp", "回合MVP"),
-    ("freeze", "Freeze Time"),
 ]
 
 PET_EVENT_NAME_MAP = dict(PET_EVENT_OPTIONS)
@@ -141,7 +135,7 @@ class GoPetPage(ScrollArea):
                 if not isinstance(e, dict):
                     continue
                 event_type = e.get('type')
-                if not event_type:
+                if event_type not in PET_EVENT_NAME_MAP:
                     continue
                 normalized = dict(e)
                 normalized['type_name'] = normalized.get('type_name') or PET_EVENT_NAME_MAP.get(event_type, 'Unknown')
