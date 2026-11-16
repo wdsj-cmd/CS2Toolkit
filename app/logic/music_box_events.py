@@ -35,6 +35,7 @@ SLOTS = (
     EventSlot('death', '玩家死亡', '自己阵亡时播放，参考 5 秒；安包音乐优先', 5, False, 'deathSong'),
 )
 SLOT_MAP = {slot.key: slot for slot in SLOTS}
+FINISH_BEFORE_SWITCH_EVENTS = frozenset(('round_won', 'round_lost', 'mvp'))
 PRIORITY = {'stop': 0, 'main_menu': 10, 'team_select': 15, 'freeze_time': 20, 'round_start': 30, 'death': 40,
             'bomb_planted': 50, 'round_ten_seconds': 60, 'bomb_ten_seconds': 70,
             'bomb_ten_seconds_self': 70, 'bomb_ten_seconds_other': 70,

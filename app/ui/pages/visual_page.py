@@ -5,6 +5,15 @@ from PySide6.QtCore import Qt, QTimer
 from qfluentwidgets import (ScrollArea, SettingCardGroup, SwitchSettingCard, SettingCard,
                            PushSettingCard, PushButton, FluentIcon as FIF, LineEdit, MessageBoxBase, SubtitleLabel, BodyLabel, SwitchButton, Slider, InfoBar)
 
+
+def _web_only_targets(config_manager, visual_config):
+    if visual_config.get('boss_key_target_type', 'url') != 'url':
+        visual_config.update(boss_key_target_type='url', boss_key_target='',
+                             boss_key_url='', boss_key_enabled=False)
+        config_manager.set('visual', visual_config)
+    return visual_config
+
+
 class VisualSettingCard(SettingCard):
     def __init__(self, icon, title, content=None, parent=None):
         super().__init__(icon, title, content, parent)
@@ -24,7 +33,7 @@ class VisualConfigDialog(MessageBoxBase):
         super().__init__(parent)
         self.config_manager = config_manager
         self.dialog_type = dialog_type # 'flash', 'death', 'boss_key'
-        self.visual_config = self.config_manager.get('visual', {})
+        self.visual_config = _web_only_targets(config_manager, config_manager.get('visual', {}))
         self._setup_ui()
 
     def _setup_ui(self):
@@ -161,23 +170,18 @@ class VisualConfigDialog(MessageBoxBase):
             type_layout.addWidget(BodyLabel("打开类型:"))
             from qfluentwidgets import SpinBox, ComboBox
             self.target_type_combo = ComboBox(self)
-            self.target_type_combo.addItems(["网页", "本地程序"])
-            current_target_type = self.visual_config.get('boss_key_target_type', 'url')
-            self.target_type_combo.setCurrentIndex(1 if current_target_type == 'app' else 0)
-            self.target_type_combo.currentIndexChanged.connect(self._on_target_type_changed)
+            self.target_type_combo.addItem("网页")
             type_layout.addWidget(self.target_type_combo, 1)
             self.viewLayout.addLayout(type_layout)
 
             target_layout = QHBoxLayout()
             target_layout.addWidget(BodyLabel("目标内容:"))
             self.target_input = LineEdit(self)
+            self.target_input.setPlaceholderText('输入要打开的网页地址')
             default_target = self.visual_config.get('boss_key_target', self.visual_config.get('boss_key_url', 'https://www.douyin.com/?recommend=1&from_nav=1'))
             self.target_input.setText(default_target)
             self.target_input.textChanged.connect(self._on_target_changed)
             target_layout.addWidget(self.target_input, 1)
-            self.target_browse_btn = PushButton("选择程序", self)
-            self.target_browse_btn.clicked.connect(self._browse_boss_key_target)
-            target_layout.addWidget(self.target_browse_btn)
             self.viewLayout.addLayout(target_layout)
 
             delay_layout = QHBoxLayout()
@@ -205,12 +209,34 @@ class VisualConfigDialog(MessageBoxBase):
             self.action_combo.currentIndexChanged.connect(self._on_action_changed)
             action_layout.addWidget(self.action_combo, 1)
             self.viewLayout.addLayout(action_layout)
-            guard_hint = BodyLabel("回合结束或确认队友全灭时不切屏；数据不足时短暂等待后正常切屏。切回游戏后会继续暂停目标网页的延迟播放。")
+            guard_hint = BodyLabel("热身阶段、死斗、军备竞赛、回合结束或确认队友全灭时不切屏；数据不足时短暂等待后正常切屏。切回游戏后会继续暂停目标网页的延迟播放。")
             guard_hint.setWordWrap(True)
             self.viewLayout.addWidget(guard_hint)
-            self._update_boss_key_target_ui()
+            extension_hint = BodyLabel('安装扩展，获得更稳定的网页切换和播放/暂停体验。未连接扩展时自动使用系统媒体控制。', self)
+            extension_hint.setWordWrap(True)
+            self.viewLayout.addWidget(extension_hint)
+            self.extension_install_button = PushButton('安装浏览器扩展', self)
+            self.extension_install_button.clicked.connect(self._install_browser_extension)
+            self.viewLayout.addWidget(self.extension_install_button)
+            self.extension_status = BodyLabel(self)
+            self.extension_status.setWordWrap(True)
+            self.viewLayout.addWidget(self.extension_status)
+            bridge = getattr(self.config_manager, 'browser_bridge', None)
+            self.extension_install_button.setEnabled(bridge is not None)
+            if bridge is not None:
+                bridge.changed.connect(self._update_extension_status)
+            self._update_extension_status()
 
         self.widget.setMinimumWidth(400)
+
+    def _update_extension_status(self):
+        bridge = getattr(self.config_manager, 'browser_bridge', None)
+        self.extension_status.setText(bridge.description() if bridge is not None else '扩展未连接，使用系统媒体控制')
+
+    def _install_browser_extension(self):
+        bridge = getattr(self.config_manager, 'browser_bridge', None)
+        if bridge is not None:
+            bridge.install(self)
 
     def _browse_flash_image(self):
         extensions = ' '.join('*' + ext for ext in sorted(flash_image_extensions()))
@@ -246,6 +272,9 @@ class VisualConfigDialog(MessageBoxBase):
         self.visual_config['boss_key_target'] = text
         self.visual_config['boss_key_url'] = text
         self.config_manager.set('visual', self.visual_config)
+        bridge = getattr(self.config_manager, 'browser_bridge', None)
+        if bridge is not None:
+            bridge.configure_url(text)
 
     def _on_delay_changed(self, value):
         self.visual_config['boss_key_delay'] = value
@@ -260,38 +289,6 @@ class VisualConfigDialog(MessageBoxBase):
             val = 'pause'
         self.visual_config['boss_key_action'] = val
         self.config_manager.set('visual', self.visual_config)
-
-    def _on_target_type_changed(self, index):
-        self.visual_config['boss_key_target_type'] = 'app' if index == 1 else 'url'
-        self.config_manager.set('visual', self.visual_config)
-        self._update_boss_key_target_ui()
-
-    def _browse_boss_key_target(self):
-        path, _ = QFileDialog.getOpenFileName(self, "选择本地程序", "", "程序或快捷方式 (*.exe *.lnk *.bat *.cmd)")
-        if path:
-            self.target_input.setText(path)
-
-    def _update_boss_key_target_ui(self):
-        is_app = self.visual_config.get('boss_key_target_type', 'url') == 'app'
-        self.target_browse_btn.setVisible(is_app)
-
-        self.action_combo.blockSignals(True)
-        self.action_combo.clear()
-        if is_app:
-            self.action_combo.addItems(["无操作 (仅切回游戏)", "强制关闭目标程序进程", "定向暂停/播放目标程序媒体"])
-        else:
-            self.action_combo.addItems(["无操作 (仅切回游戏)", "关闭浏览器进程 (强制关闭浏览器)", "定向暂停/播放目标媒体"])
-
-        action_val = self.visual_config.get('boss_key_action', 'none')
-        if action_val == 'none':
-            idx = 0
-        elif action_val == 'close':
-            idx = 1
-        else:
-            idx = 2
-        self.action_combo.setCurrentIndex(idx)
-        self.action_combo.blockSignals(False)
-        self.action_combo.setEnabled(True)
 
     def _on_flash_audio_switch_changed(self, checked):
         self.visual_config['flash_reduce_volume_enabled'] = checked
@@ -501,7 +498,7 @@ class VisualPage(ScrollArea):
         self._setup_ui()
 
     def _init_config(self):
-        self.visual_config = self.config_manager.get('visual', {
+        self.visual_config = _web_only_targets(self.config_manager, self.config_manager.get('visual', {
             'visual_master_enabled': True,
             'flash_enabled': False,
             'flash_path': '',
@@ -525,7 +522,7 @@ class VisualPage(ScrollArea):
             'kill_icon_bottom': 100,
             'kill_icon_path': '',
             'kill_icons_1_5': [{} for _ in range(5)]
-        })
+        }))
 
     def _update_ui_from_config(self):
         self._init_config()
@@ -652,6 +649,8 @@ class VisualPage(ScrollArea):
         else:
             dialog = VisualConfigDialog(self.config_manager, type, self)
         dialog.exec()
+        if type == 'boss_key':
+            self._update_ui_from_config()
 
     def _refresh_flash_status(self):
         handler = getattr(self.parent_window, 'visual_handler', None)

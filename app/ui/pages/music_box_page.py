@@ -10,7 +10,7 @@ from qfluentwidgets import (
     Slider, SpinBox, SubtitleLabel, SwitchButton, TitleLabel,
 )
 
-from app.logic.music_box_events import SLOTS, SLOT_MAP
+from app.logic.music_box_events import SLOTS, SLOT_MAP, FINISH_BEFORE_SWITCH_EVENTS
 from app.logic.music_box_library import AUDIO_EXTENSIONS, event_options, validate_clip
 from app.ui.fluent_dialogs import TextInputDialog
 
@@ -44,17 +44,30 @@ class ClipDialog(MessageBoxBase):
         self.loading = False
         self.viewLayout.addWidget(SubtitleLabel(SLOT_MAP[event].title, self))
         options = event_options(controller.kit, event)
-        hint = BodyLabel('可添加多个备选切片。开启随机播放后，每次事件随机选一个；关闭时播放当前选中的切片。', self)
+        hint = BodyLabel('可添加多个备选切片。开启随机后，每次播放和循环换片时重新抽取，多首时不连续重复。', self)
         hint.setWordWrap(True)
         self.viewLayout.addWidget(hint)
         random_row = QHBoxLayout()
         random_row.addWidget(BodyLabel('随机播放', self), 1)
         self.random_play = SwitchButton(self)
-        self.random_play.setOnText('每次随机选一个切片')
+        self.random_play.setOnText('每次重抽，多首时不连续重复')
         self.random_play.setOffText('固定播放当前选中切片')
         self.random_play.setChecked(options['random'])
         random_row.addWidget(self.random_play)
         self.viewLayout.addLayout(random_row)
+        self.finish_before_switch = None
+        if event in FINISH_BEFORE_SWITCH_EVENTS:
+            finish_row = QHBoxLayout()
+            finish_row.addWidget(BodyLabel('完整播放后切换', self), 1)
+            self.finish_before_switch = SwitchButton(self)
+            self.finish_before_switch.setOnText('播完当前切片再切换')
+            self.finish_before_switch.setOffText('允许新事件打断')
+            self.finish_before_switch.setChecked(options['finish_before_switch'])
+            finish_row.addWidget(self.finish_before_switch)
+            self.viewLayout.addLayout(finish_row)
+            finish_hint = CaptionLabel('按设置时长完整播放一次；时长为 0 时播完剩余音频。停止播放和手动试听仍立即生效。', self)
+            finish_hint.setWordWrap(True)
+            self.viewLayout.addWidget(finish_hint)
         self.list = ListWidget(self)
         self.list.setFixedHeight(126)
         self.viewLayout.addWidget(self.list)
@@ -85,14 +98,14 @@ class ClipDialog(MessageBoxBase):
         volume_row.addWidget(self.volume, 1)
         volume_row.addWidget(self.volume_value)
         self.loop = SwitchButton(self)
-        self.loop.setOnText('循环此切片')
+        self.loop.setOnText('连续播放')
         self.loop.setOffText('播放一次')
         form.addRow('从音频的位置开始', self.start)
         form.addRow('播放时长（0 为完整剩余音频）', self.duration)
         form.addRow('切片音量', volume_row)
         form.addRow('循环', self.loop)
         self.viewLayout.addLayout(form)
-        note = CaptionLabel('时长可自行修改；新的游戏事件会切换曲目。试听时不循环。', self)
+        note = CaptionLabel('开启随机后，循环播完会重新选片，多首时不连续重复；关闭随机则循环当前切片。试听时不循环。', self)
         note.setWordWrap(True)
         self.viewLayout.addWidget(note)
         self.widget.setMinimumWidth(540)
@@ -110,7 +123,8 @@ class ClipDialog(MessageBoxBase):
         self._refresh(options['selected_index'])
 
     def playback_options(self):
-        return {'random': self.random_play.isChecked(), 'selected_index': max(0, self.current)}
+        return {'random': self.random_play.isChecked(), 'selected_index': max(0, self.current),
+                'finish_before_switch': bool(self.finish_before_switch and self.finish_before_switch.isChecked())}
 
     def _refresh(self, selected=0):
         self.current = -1
