@@ -10,7 +10,7 @@ from qfluentwidgets import (
     Slider, SpinBox, SubtitleLabel, SwitchButton, TitleLabel,
 )
 
-from app.logic.music_box_events import SLOTS, SLOT_MAP, FINISH_BEFORE_SWITCH_EVENTS
+from app.logic.music_box_events import SLOTS, SLOT_MAP, FINISH_BEFORE_SWITCH_EVENTS, BOMB_WARNING_EVENTS
 from app.logic.music_box_library import AUDIO_EXTENSIONS, event_options, validate_clip
 from app.ui.fluent_dialogs import TextInputDialog
 
@@ -68,6 +68,19 @@ class ClipDialog(MessageBoxBase):
             finish_hint = CaptionLabel('按设置时长完整播放一次；时长为 0 时播完剩余音频。停止播放和手动试听仍立即生效。', self)
             finish_hint.setWordWrap(True)
             self.viewLayout.addWidget(finish_hint)
+        self.t_round_end_override = None
+        if event in BOMB_WARNING_EVENTS:
+            t_row = QHBoxLayout()
+            t_row.addWidget(BodyLabel('T 方延续播放', self), 1)
+            self.t_round_end_override = SwitchButton(self)
+            self.t_round_end_override.setOnText('代替胜利和 MVP 音乐')
+            self.t_round_end_override.setOffText('按正常事件切换')
+            self.t_round_end_override.setChecked(options['t_round_end_override'])
+            t_row.addWidget(self.t_round_end_override)
+            self.viewLayout.addLayout(t_row)
+            t_hint = CaptionLabel('仅自己为 T 方时生效：按设置时长播完一次，跳过本回合胜利和 MVP 音乐；失败立即切换失败音乐。时长 0 为播完剩余音频。', self)
+            t_hint.setWordWrap(True)
+            self.viewLayout.addWidget(t_hint)
         self.list = ListWidget(self)
         self.list.setFixedHeight(126)
         self.viewLayout.addWidget(self.list)
@@ -124,7 +137,8 @@ class ClipDialog(MessageBoxBase):
 
     def playback_options(self):
         return {'random': self.random_play.isChecked(), 'selected_index': max(0, self.current),
-                'finish_before_switch': bool(self.finish_before_switch and self.finish_before_switch.isChecked())}
+                'finish_before_switch': bool(self.finish_before_switch and self.finish_before_switch.isChecked()),
+                't_round_end_override': bool(self.t_round_end_override and self.t_round_end_override.isChecked())}
 
     def _refresh(self, selected=0):
         self.current = -1

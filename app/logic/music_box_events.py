@@ -36,6 +36,7 @@ SLOTS = (
 )
 SLOT_MAP = {slot.key: slot for slot in SLOTS}
 FINISH_BEFORE_SWITCH_EVENTS = frozenset(('round_won', 'round_lost', 'mvp'))
+BOMB_WARNING_EVENTS = frozenset(('bomb_ten_seconds', 'bomb_ten_seconds_self', 'bomb_ten_seconds_other'))
 PRIORITY = {'stop': 0, 'main_menu': 10, 'team_select': 15, 'freeze_time': 20, 'round_start': 30, 'death': 40,
             'bomb_planted': 50, 'round_ten_seconds': 60, 'bomb_ten_seconds': 70,
             'bomb_ten_seconds_self': 70, 'bomb_ten_seconds_other': 70,

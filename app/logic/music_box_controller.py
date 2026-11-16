@@ -5,7 +5,7 @@ import math
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from .music_box_events import MusicEventEngine, MusicCue, SLOT_MAP, FINISH_BEFORE_SWITCH_EVENTS, object_node, number
+from .music_box_events import MusicEventEngine, MusicCue, SLOT_MAP, FINISH_BEFORE_SWITCH_EVENTS, BOMB_WARNING_EVENTS, object_node, number
 from .music_box_library import MusicKitLibrary, event_options, validate_clip
 from .music_box_player import MusicBoxPlayer
 from .music_bomb_visual import BombVisualMonitor
@@ -53,6 +53,9 @@ class MusicBoxController(QObject):
         self._audio_request = None
         self._cue_choice = None
         self._protected_cue = None
+        self._t_bomb_protected = False
+        self._t_bomb_override_round = None
+        self._t_bomb_loss_started = False
         self._pending_result_cues = []
         self._pending_cue = None
         self._last_random_clip = {}
@@ -279,6 +282,7 @@ class MusicBoxController(QObject):
         first = self._last_gsi is None
         self._last_gsi = time.monotonic()
         cue = self.engine.process(state)
+        self._sync_t_bomb_override_round()
         map_info = object_node(state.get('map'))
         player = object_node(state.get('player'))
         if 'phase' in map_info:
@@ -389,10 +393,47 @@ class MusicBoxController(QObject):
 
     def _clear_playback_protection(self):
         self._protected_cue = None
+        self._t_bomb_protected = False
+        self._t_bomb_override_round = None
+        self._t_bomb_loss_started = False
         self._pending_result_cues.clear()
         self._pending_cue = None
 
+    def _sync_t_bomb_override_round(self):
+        scope = self._t_bomb_override_round
+        if scope is None:
+            return
+        if self.engine.map_name != scope[0] or self.engine.team != 'T':
+            if self._t_bomb_protected:
+                self._clear_playback_protection()
+            else:
+                self._t_bomb_override_round = None
+                self._t_bomb_loss_started = False
+        elif (self.engine.phase == 'freezetime'
+              or (self.engine.phase == 'live' and self.engine.round_number != scope[1])):
+            # An incremented round counter in an 'over' packet still belongs
+            # to the old result. Reset result suppression when play restarts.
+            self._t_bomb_override_round = None
+            self._t_bomb_loss_started = False
+
     def _play_cue(self, cue, resume=False, repeat=False, round_result=None):
+        self._sync_t_bomb_override_round()
+        result = self.engine.round_result if round_result is None else round_result
+        if self._t_bomb_override_round is not None and cue.event in ('round_won', 'mvp'):
+            if result == 'round_lost':
+                if self._t_bomb_loss_started:
+                    return
+                cue = MusicCue('round_lost', cue.started)
+            else:
+                self.diagnostic.emit('music_cue_replaced_by_t_c4', {'cue': cue.event})
+                return
+        if cue.event == 'round_lost' and (self._t_bomb_protected or self._t_bomb_override_round is not None):
+            if self._t_bomb_override_round is not None and self._t_bomb_loss_started:
+                return
+            scope = self._t_bomb_override_round
+            self._clear_playback_protection()
+            self._t_bomb_override_round = scope
+            self._t_bomb_loss_started = True
         if self._protected_cue is not None:
             if cue != self._protected_cue:
                 pending = (cue, self.engine.round_result if round_result is None else round_result)
@@ -445,11 +486,17 @@ class MusicBoxController(QObject):
                 clip['duration'] -= elapsed
         try:
             path = self.library.resolve(self.kit, clip)
+            t_bomb = (cue.event in BOMB_WARNING_EVENTS and self.engine.team == 'T'
+                      and event_options(self.kit, event)['t_round_end_override'])
             protected = (cue.event in FINISH_BEFORE_SWITCH_EVENTS
-                         and event_options(self.kit, cue.event)['finish_before_switch'])
+                         and event_options(self.kit, cue.event)['finish_before_switch']) or t_bomb
             if protected:
                 clip['loop'] = False
                 self._protected_cue = cue
+                self._t_bomb_protected = t_bomb
+                if t_bomb:
+                    self._t_bomb_override_round = (self.engine.map_name, self.engine.round_number)
+                    self._t_bomb_loss_started = False
             if cue.event == 'team_select':
                 self.player.stop()
             clip['fade_ms'] = 15 if cue.event == 'team_select' else 50 if cue.event.startswith('bomb_') else 180
@@ -458,6 +505,7 @@ class MusicBoxController(QObject):
             self._audio_request = (cue.event, started, started if repeat else cue.started)
             self.diagnostic.emit('music_cue', {'cue': cue.event, 'fallback': used_fallback,
                 'repeat': repeat, 'random': event_options(self.kit, event)['random'],
+                't_round_end_override': t_bomb,
                 'clip_index': clip_index,
                 'clip_count': len(clips),
                 'signal_source': self.engine.plant_signal_source,
@@ -472,6 +520,9 @@ class MusicBoxController(QObject):
                              + ' · ' + clip.get('name', path.name))
             elif protected and self._protected_cue == cue:
                 self._protected_cue = None
+                self._t_bomb_protected = False
+                self._t_bomb_override_round = None
+                self._t_bomb_loss_started = False
                 self._play_deferred_cue()
         except (OSError, ValueError) as exc:
             self._failed(str(exc))
@@ -498,6 +549,7 @@ class MusicBoxController(QObject):
             self.previewing = False
 
     def _finished(self):
+        self._t_bomb_protected = False
         if self._protected_cue is not None:
             self._protected_cue = None
         if self._play_deferred_cue():
@@ -525,6 +577,9 @@ class MusicBoxController(QObject):
 
     def _failed(self, message):
         self._protected_cue = None
+        self._t_bomb_protected = False
+        self._t_bomb_override_round = None
+        self._t_bomb_loss_started = False
         self._audio_request = None
         self.player.stop()
         self.previewing = False
