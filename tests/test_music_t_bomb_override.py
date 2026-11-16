@@ -137,7 +137,9 @@ class TerroristBombOverrideTests(unittest.TestCase):
         self.arm()
         self.assign('round_won', protected=False)
         self.packet('over', bomb='planted', winner='T')
-        self.packet('over', winner='T', mvps=1)
+        # An explosion arriving after an elimination result must not change
+        # the already chosen outcome or suppress a subsequently awarded MVP.
+        self.packet('over', bomb='exploded', winner='T', mvps=1)
         self.assertEqual(self.names(), ['bomb_ten_seconds', 'round_won', 'mvp'])
 
     def test_unknown_bomb_outcome_uses_normal_result_instead_of_assuming_explosion(self):
