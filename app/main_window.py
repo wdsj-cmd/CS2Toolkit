@@ -42,7 +42,7 @@ class UpdateSignalEmitter(QObject):
 class CS2Tool(FluentWindow):
     def __init__(self):
         super().__init__()
-        self.version = "1.5.1-alpha.11"
+        self.version = "1.5.1-alpha.12"
         self._last_received_flash = None
         self.repo_url = "https://github.com/clover-233/CS2Toolkit"
         self.is_dark_mode = False
@@ -69,6 +69,7 @@ class CS2Tool(FluentWindow):
         self.visual_handler = VisualHandler(self.config_manager)
         self.music_box = MusicBoxController(self.config_manager, self)
         self.music_box.diagnostic.connect(lambda event, details: record(event, **details))
+        record('toolkit_started', version=self.version)
         QApplication.instance().aboutToQuit.connect(self.music_box.cleanup)
         self.go_pet_manager = GoPetManager(self.config_manager)
         self.steam_path = ""
@@ -189,7 +190,7 @@ class CS2Tool(FluentWindow):
                 self.setting_tab.gsi_port_input.setEnabled(False)
 
     def init_window(self):
-        self.setWindowTitle("CS2 工具箱 · 1.5.1-alpha.11")
+        self.setWindowTitle("CS2 工具箱 · 1.5.1-alpha.12")
         self.setWindowIcon(QIcon(":/app_icon.ico"))
         self.resize(750, 780)
         self.center()

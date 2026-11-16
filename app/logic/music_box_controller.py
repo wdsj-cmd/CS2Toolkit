@@ -65,6 +65,7 @@ class MusicBoxController(QObject):
         self._bomb_signature = None
         self._bomb_input_signature = None
         self._team_state_signature = None
+        self._pause_watch_signature = None
         self.kit = None
         self.previewing = False
         self.status = '未启用，准备好音乐切片后即可配置'
@@ -90,6 +91,8 @@ class MusicBoxController(QObject):
             self.clock_monitor.pause_sampled.connect(self._on_pause_visual)
         if hasattr(self.clock_monitor, 'pause_diagnostic'):
             self.clock_monitor.pause_diagnostic.connect(lambda details: self.diagnostic.emit('music_timeout_detection', details))
+        if hasattr(self.clock_monitor, 'pause_status_changed'):
+            self.clock_monitor.pause_status_changed.connect(lambda details: self.diagnostic.emit('music_timeout_sample', details))
         self.clock_monitor.status_changed.connect(lambda text: self.diagnostic.emit('music_round_clock_status', {'status': text}))
         self.save_timer = QTimer(self)
         self.save_timer.setSingleShot(True)
@@ -171,11 +174,19 @@ class MusicBoxController(QObject):
         self.clock_monitor.set_context(key, eligible and self.engine.round_deadline is None, received,
             watch=eligible and self.engine.round_clock_source == 'hud')
         if hasattr(self.clock_monitor, 'set_pause_context'):
-            pause_watch = bool(self.enabled and not self._closed and self._clock_map_live
-                and not self._clock_blocked and not self._clock_menu and not self._team_menu_open
-                and self.engine.phase == 'freezetime' and not self.engine.pause_gsi_available
-                and self.kit and self.kit['tracks'].get('timeout'))
+            clips = self.kit['tracks'].get('timeout', []) if self.kit else []
+            checks = {'enabled': self.enabled, 'open': not self._closed, 'map_live': self._clock_map_live,
+                'not_flashed': not self._clock_blocked, 'not_menu': not self._clock_menu,
+                'not_team_menu': not self._team_menu_open, 'freezetime': self.engine.phase == 'freezetime',
+                'needs_visual': not self.engine.pause_gsi_available, 'has_timeout_clip': bool(clips)}
+            pause_watch = all(checks.values())
             self.clock_monitor.set_pause_context(key, pause_watch, received)
+            signature = tuple(checks.values()), len(clips), self.engine.phase, self.previewing
+            if signature != self._pause_watch_signature:
+                self._pause_watch_signature = signature
+                self.diagnostic.emit('music_timeout_watch', {'ready': pause_watch,
+                    'blocked_by': [name for name, value in checks.items() if not value],
+                    'round_phase': self.engine.phase, 'timeout_clip_count': len(clips), 'previewing': self.previewing})
 
     def _on_pause_visual(self, key, paused, observed_at):
         if (self._closed or not self.enabled or key != (self.engine.map_name, self.engine.round_number)

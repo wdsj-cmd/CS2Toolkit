@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFont, QImage, QPainter
 
-from app.logic.music_round_clock import PauseReadings, RoundClockMonitor, pause_icon_visible, is_pause_banner, pause_banner_region
+from app.logic.music_round_clock import PauseReadings, RoundClockMonitor, pause_icon_visible, is_pause_banner, pause_banner_region, round_clock_region
 import test_music_timeout as base
 
 
@@ -39,6 +39,18 @@ class PauseIconTests(unittest.TestCase):
     def test_pause_symbol_at_multiple_hud_resolutions(self):
         for size in ((144, 49), (108, 37), (192, 65), (72, 25)):
             self.assertIs(pause_icon_visible(hud(pause=True, size=size)), True)
+
+    def test_reported_1440_by_900_layout_and_smaller_hud_symbols(self):
+        self.assertEqual(round_clock_region((0, 0, 1440, 900)), (675, 0, 90, 31))
+        self.assertEqual(pause_banner_region((0, 0, 1440, 900)), (495, 621, 450, 54))
+        for scale in (1, .85, .75, .65, .55, .5):
+            image = QImage(90, 31, QImage.Format_RGB32); image.fill(QColor('#202020'))
+            h, w, gap = round(30*900/1440*scale), round(12*900/1440*scale), round(5*900/1440*scale)
+            left, top = (90-2*w-gap)//2, (31-h)//2
+            painter = QPainter(image)
+            for x in (left, left+w+gap): painter.fillRect(x, top, w, h, QColor('#ff2020'))
+            painter.end()
+            self.assertIs(pause_icon_visible(image), True, scale)
 
     def test_normal_or_red_numeric_timer_cannot_start_pause(self):
         for text in ('1:55', '0:11', '0:01', '0:10', '0:00', '11:11'):
@@ -140,8 +152,63 @@ class HudPauseMusicTests(unittest.TestCase):
         self.visual(True, key=old)
         self.assertFalse(self.controller.engine.round_paused)
 
+    def test_watch_diagnostics_distinguish_missing_clip_from_ready_and_menu(self):
+        events = []
+        self.controller.diagnostic.connect(lambda event, details: events.append((event, details)))
+        self.prepare(clip=False)
+        watches = [r for e, r in events if e == 'music_timeout_watch']
+        self.assertIn('has_timeout_clip', watches[-1]['blocked_by'])
+        self.assign('timeout', duration=0, loop=True); self.packet()
+        watches = [r for e, r in events if e == 'music_timeout_watch']
+        self.assertTrue(watches[-1]['ready'])
+        self.assertEqual(watches[-1]['timeout_clip_count'], 1)
+        count = len(events); self.packet()
+        self.assertEqual(len(events), count)
+        self.packet(activity='menu')
+        watches = [r for e, r in events if e == 'music_timeout_watch']
+        self.assertIn('not_menu', watches[-1]['blocked_by'])
+        self.assertNotIn(str(self.config.work_dir), str(watches))
+
 
 class PauseWorkerTests(unittest.TestCase):
+    def test_diagnostic_reports_are_rate_limited_and_can_report_fatal_failure(self):
+        monitor = RoundClockMonitor()
+        reports = []
+        monitor.pause_status_changed.connect(reports.append)
+        monitor._pause_status('waiting_foreground')
+        monitor._pause_status('waiting_foreground')
+        self.assertEqual(len(reports), 1)
+        monitor._pause_status('worker_error', force=True, error_type='OSError')
+        self.assertEqual(len(reports), 2)
+        self.assertEqual(reports[-1]['error_type'], 'OSError')
+
+    def test_black_capture_and_missing_ocr_are_reported_without_image_or_text_payloads(self):
+        samples = []
+        tracker = SimpleNamespace(find=lambda: 42, client_geometry=lambda hwnd: (0, 0, 1440, 900),
+            user32=SimpleNamespace(GetForegroundWindow=lambda: 42))
+        frame = QImage(90, 31, QImage.Format_RGB32); frame.fill(Qt.black)
+        source = SimpleNamespace(grab=lambda region: frame, close=lambda: None)
+        def broken_reader(): raise OSError('private diagnostic text must not be logged')
+        monitor = RoundClockMonitor(source_factory=lambda: source, tracker_factory=lambda: tracker,
+            pause_reader_factory=broken_reader)
+        monitor.pause_status_changed.connect(samples.append)
+        monitor.set_context(('map', 1), False, time.monotonic())
+        monitor.set_pause_context(('map', 1), True, time.monotonic())
+        monitor.start()
+        try:
+            base.pump(700)
+            self.assertEqual(len(samples), 1)
+            report = samples[0]
+            self.assertEqual(report['window_size'], [1440, 900])
+            self.assertEqual(report['dark_fraction'], 1)
+            self.assertIsNone(report['icon'])
+            self.assertEqual(report['ocr_error'], 'OSError')
+            self.assertNotIn('private diagnostic', str(report))
+            self.assertNotIn('text', report)
+            self.assertNotIn('image', report)
+        finally:
+            self.assertTrue(monitor.stop())
+
     def test_banner_is_independent_of_icon_and_ocr_runs_at_most_once_per_second(self):
         banner_reads, detected, evidence = [], [], []
         tracker = SimpleNamespace(find=lambda: 42, client_geometry=lambda hwnd: (0, 0, 2560, 1440),

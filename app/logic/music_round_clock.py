@@ -205,6 +205,7 @@ class RoundClockMonitor(QObject):
     resync_requested = Signal(object)
     pause_sampled = Signal(object, bool, float)
     pause_diagnostic = Signal(dict)
+    pause_status_changed = Signal(dict)
 
     def __init__(self, parent=None, reader_factory=None, source_factory=None, tracker_factory=None,
                  pause_reader_factory=None):
@@ -219,6 +220,7 @@ class RoundClockMonitor(QObject):
         self._stop = threading.Event()
         self._thread = None
         self.status = ''
+        self._next_pause_status = 0
 
     def set_context(self, key, active, received_at, watch=False):
         with self._lock:
@@ -249,6 +251,13 @@ class RoundClockMonitor(QObject):
             self.status = text
             self.status_changed.emit(text)
 
+    def _pause_status(self, stage, force=False, **details):
+        # Bounded diagnostics without screenshots, OCR text, player IDs or paths.
+        now = time.monotonic()
+        if force or now >= self._next_pause_status:
+            self._next_pause_status = now+5
+            self.pause_status_changed.emit({'stage': stage, **details})
+
     def _run(self):
         reader = source = pause_reader = None
         try:
@@ -271,6 +280,8 @@ class RoundClockMonitor(QObject):
             pause_reader_unavailable = False
             next_banner = 0
             banner_visible, banner_at = False, 0
+            banner_text_seen = banner_pause_word = banner_clock = False
+            pause_ocr_error = None
             while not self._stop.is_set():
                 now = time.monotonic()
                 with self._lock:
@@ -285,6 +296,8 @@ class RoundClockMonitor(QObject):
                         readings.reset()
                         pause_readings = PauseReadings()
                         banner_visible, banner_at, next_banner = False, 0, 0
+                        banner_text_seen = banner_pause_word = banner_clock = False
+                        self._next_pause_status = 0
                         key = current
                         was_foreground = False
                     pause_active = bool(pause_context and pause_context[0] == key
@@ -307,6 +320,10 @@ class RoundClockMonitor(QObject):
                     readings.reset()
                     pause_readings.reset_pending()
                     banner_visible, banner_at = False, 0
+                    if pause_context and pause_context[1]:
+                        stage = ('stale_gsi' if now-pause_context[2] > 3 else
+                                 'waiting_foreground' if game_hwnd else 'game_window_not_found')
+                        self._pause_status(stage)
                     if source is not None:
                         source.close()
                         source = None
@@ -339,12 +356,27 @@ class RoundClockMonitor(QObject):
                                                 pause_reader = self.pause_reader_factory()
                                             banner_frame = source.grab(pause_banner_region(geometry))
                                             if banner_frame is not None and not banner_frame.isNull():
-                                                banner_visible = is_pause_banner(pause_reader.read(banner_frame))
+                                                text = pause_reader.read(banner_frame)
+                                                compact = re.sub(r'\s+', '', text).lower().replace('：', ':')
+                                                banner_text_seen = bool(compact)
+                                                banner_pause_word = '暂停' in compact or 'timeout' in compact or 'paused' in compact
+                                                banner_clock = bool(re.search(r'\d{1,2}:[0-5]\d', compact))
+                                                banner_visible = is_pause_banner(text)
                                                 banner_at = time.monotonic()
-                                        except Exception:
+                                        except Exception as error:
                                             pause_reader_unavailable = True
+                                            pause_ocr_error = type(error).__name__
                                         next_banner = time.monotonic()+1
                                     banner = banner_visible and time.monotonic()-banner_at < 1.5
+                                    if time.monotonic() >= self._next_pause_status:
+                                        thumbnail = frame.scaled(8, 4, Qt.IgnoreAspectRatio, Qt.FastTransformation).convertToFormat(QImage.Format_RGBA8888)
+                                        pixels = np.frombuffer(thumbnail.constBits(), dtype=np.uint8).reshape(-1, 4)[:, :3]
+                                        self._pause_status('captured', window_size=list(geometry[2:]),
+                                            timer_size=[frame.width(), frame.height()], icon=icon, banner=bool(banner),
+                                            dark_fraction=round(float((pixels.max(axis=1) <= 20).mean()), 3),
+                                            bright_fraction=round(float((pixels.min(axis=1) >= 230).mean()), 3),
+                                            banner_text_seen=banner_text_seen, banner_pause_word=banner_pause_word,
+                                            banner_clock=banner_clock, ocr_error=pause_ocr_error)
                                     visible = True if icon is True or banner else icon
                                     changed = pause_readings.observe(visible, observed_at)
                                     if changed is not None:
@@ -372,9 +404,15 @@ class RoundClockMonitor(QObject):
                                             if value is not None:
                                                 self.sampled.emit(key, value, readings.anchor_at)
                                                 self._status('正在读取顶部计时器')
+                        elif pause_active:
+                            self._pause_status('empty_frame')
+                    elif pause_active:
+                        self._pause_status('missing_geometry')
                     next_sample = time.monotonic() + (.25 if pause_active else (1 if readings.confirmed else .5))
                 self._stop.wait(.1)
-        except Exception:
+        except Exception as error:
+            if self._pause_context and self._pause_context[1]:
+                self._pause_status('worker_error', force=True, error_type=type(error).__name__)
             self._status('系统文字识别不可用')
         finally:
             if source is not None:
