@@ -34,6 +34,7 @@ class Monitor(QObject):
     sampled = Signal(object, int, float)
     resync_requested = Signal(object)
     pause_sampled = Signal(object, bool, float)
+    game_visibility_changed = Signal(bool, bool)
     def __init__(self, *args): super().__init__()
     def start(self): pass
     def stop(self): pass

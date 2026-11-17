@@ -9,6 +9,8 @@ from PySide6.QtGui import QColor, QFont, QImage, QPainter
 
 from app.logic.music_round_clock import PauseReadings, PauseBannerTracker, RoundClockMonitor, WindowsClockReader, PauseBannerReader, pause_icon_visible, is_pause_banner, pause_banner_candidate, pause_banner_region, round_clock_region
 from app.logic.music_box_events import MusicEventEngine
+from app.logic.music_pause_timer import pause_timer_region
+from test_music_pause_timer import timer_frame
 import test_music_timeout as base
 
 
@@ -183,9 +185,13 @@ class HudPauseMusicTests(unittest.TestCase):
         self.player.faded_out.emit()
         self.assertEqual(self.names(), ['freeze_time', 'timeout', 'freeze_time'])
 
-    def test_live_round_ends_hud_pause_even_if_final_icon_disappearance_was_missed(self):
+    def test_stage_change_waits_for_timer_motion_before_ending_hud_pause(self):
         self.prepare(); self.visual(True); self.packet(phase='live')
         self.assertFalse(self.controller.engine.round_paused)
+        self.assertTrue(self.controller._pause_active)
+        self.assertFalse(self.player.fade_requests)
+        self.assertTrue(self.controller.clock_monitor.pause_context[4])
+        self.visual(False)
         self.assertEqual(self.player.fade_requests, [1200])
         self.player.faded_out.emit()
         self.assertEqual(self.names()[-1], 'round_start')
@@ -201,13 +207,15 @@ class HudPauseMusicTests(unittest.TestCase):
         self.player.faded_out.emit()
         self.assertEqual(self.names()[-1], 'round_start')
 
-    def test_intermittent_ocr_misses_do_not_restart_pause_music(self):
+    def test_hidden_banner_and_buy_menu_do_not_restart_pause_music(self):
         self.prepare()
-        shown, calls = [True], []
+        shown, calls, moving = [True], [], [False]
         picture = banner(); scene = QImage(450, 54, QImage.Format_RGB32); scene.fill(QColor('#807060'))
         tracker = SimpleNamespace(find=lambda: 42, client_geometry=lambda hwnd: (0, 0, 1440, 900),
             user32=SimpleNamespace(GetForegroundWindow=lambda: 42))
-        source = SimpleNamespace(grab=lambda region: picture if shown[0] else scene, close=lambda: None)
+        timer = pause_timer_region((0, 0, 1440, 900))
+        source = SimpleNamespace(grab=lambda region: timer_frame('1:25' if moving[0] else '1:26')
+            if region == timer else picture if shown[0] else scene, close=lambda: None)
         def read(image):
             calls.append(True)
             return 'T队暂停还剩0:44' if len(calls) == 1 else 'T 队 停 0：'
@@ -222,22 +230,65 @@ class HudPauseMusicTests(unittest.TestCase):
                 self.packet()
                 now = time.monotonic()
                 monitor.set_context(key, False, now)
-                monitor.set_pause_context(key, True, now, False, self.controller.engine.round_paused)
+                monitor.set_pause_context(key, True, now, False, self.controller._pause_active)
                 base.pump(25)
         with patch('app.logic.music_round_clock.BANNER_RECHECK_SECONDS', .3):
             now = time.monotonic(); monitor.set_context(key, False, now)
             monitor.set_pause_context(key, True, now, False, False); monitor.start()
             try:
-                pump(2.2)
-                self.assertGreaterEqual(len(calls), 3)
+                pump(3.7)
+                self.assertFalse(calls)
                 self.assertEqual(self.names().count('timeout'), 1)
                 self.assertFalse(self.player.fade_requests)
                 self.assertTrue(self.controller.engine.round_paused)
                 shown[0] = False; pump(1.8)
+                self.assertFalse(self.player.fade_requests)
+                self.assertEqual(self.names().count('timeout'), 1)
+                moving[0] = True; pump(1.3)
                 self.assertEqual(self.player.fade_requests, [1200])
                 self.assertFalse(self.controller.engine.round_paused)
             finally:
                 self.assertTrue(monitor.stop())
+
+    def test_background_gsi_changes_and_stale_data_keep_current_pause_cue(self):
+        self.prepare(); self.visual(True)
+        cue = self.controller._pause_cue
+        self.controller.clock_monitor.game_visibility_changed.emit(True, False)
+        self.packet(phase='live')
+        self.controller._last_gsi = time.monotonic()-10
+        self.controller._tick()
+        self.assertIs(self.controller._pause_cue, cue)
+        self.assertFalse(self.player.fade_requests)
+        self.assertEqual(self.names().count('timeout'), 1)
+        self.controller.clock_monitor.game_visibility_changed.emit(True, True)
+        self.assertFalse(self.player.fade_requests)
+        self.visual(False)
+        self.assertEqual(self.player.fade_requests, [1200])
+
+    def test_background_gsi_authoritative_resume_is_applied_on_return(self):
+        self.prepare(); self.packet('timeout_ct')
+        self.controller.clock_monitor.game_visibility_changed.emit(True, False)
+        self.packet('freezetime')
+        self.assertFalse(self.player.fade_requests)
+        self.controller.clock_monitor.game_visibility_changed.emit(True, True)
+        self.assertEqual(self.player.fade_requests, [1200])
+
+    def test_buy_menu_during_pause_retains_watch_and_accepts_timer_resume(self):
+        self.prepare(); self.visual(True)
+        self.packet(activity='menu')
+        self.assertTrue(self.controller.clock_monitor.pause_context[1])
+        self.assertEqual(self.names().count('timeout'), 1)
+        self.visual(False)
+        self.assertEqual(self.player.fade_requests, [1200])
+
+    def test_closed_game_clears_background_pause_without_restarting(self):
+        self.prepare(); self.visual(True)
+        self.controller.clock_monitor.game_visibility_changed.emit(True, False)
+        stops = self.player.stops
+        self.controller.clock_monitor.game_visibility_changed.emit(False, False)
+        self.assertFalse(self.controller._pause_active)
+        self.assertGreater(self.player.stops, stops)
+        self.assertEqual(self.names().count('timeout'), 1)
 
     def test_estimated_bomb_timer_does_not_expire_while_live_pause_is_active(self):
         now = [100.0]
@@ -331,13 +382,52 @@ class HudPauseMusicTests(unittest.TestCase):
 
 
 class PauseWorkerTests(unittest.TestCase):
-    def test_live_round_uses_only_small_banner_and_no_ocr_for_scenery(self):
+    def test_background_stops_capture_and_return_waits_for_timer_motion(self):
+        foreground, text, captures, detected, visibility = [42], [None], [], [], []
+        tracker = SimpleNamespace(find=lambda: 42, client_geometry=lambda hwnd: (0, 0, 720, 480),
+            user32=SimpleNamespace(GetForegroundWindow=lambda: foreground[0]))
+        def grab(region):
+            captures.append(region)
+            return timer_frame(text[0] or '1:26', (720, 480), bars=text[0] is None)
+        source = SimpleNamespace(grab=grab, close=lambda: None)
+        monitor = RoundClockMonitor(source_factory=lambda: source, tracker_factory=lambda: tracker)
+        monitor.pause_sampled.connect(lambda *args: detected.append(args))
+        monitor.game_visibility_changed.connect(lambda *args: visibility.append(args))
+        def refresh(milliseconds):
+            end = time.monotonic()+milliseconds/1000
+            while time.monotonic() < end:
+                now = time.monotonic()
+                monitor.set_context(('map', 1), False, now, watch=True)
+                monitor.set_pause_context(('map', 1), True, now)
+                base.pump(20)
+        refresh(1); monitor.start()
+        try:
+            refresh(750)
+            self.assertTrue(detected[-1][1])
+            foreground[0] = 99; refresh(200)
+            count = len(captures); refresh(600)
+            self.assertEqual(len(captures), count)
+            self.assertTrue(detected[-1][1])
+            text[0] = '1:26'; foreground[0] = 42; refresh(650)
+            self.assertTrue(detected[-1][1])
+            text[0] = '1:25'; refresh(1200)
+            self.assertFalse(detected[-1][1])
+            self.assertIn((True, False), visibility)
+            self.assertEqual(visibility[-1], (True, True))
+        finally:
+            self.assertTrue(monitor.stop())
+
+    def test_live_round_banner_hint_can_start_but_its_absence_cannot_end_pause(self):
         captures, ocr_calls, detections = [], [], []
-        shown = [False]
+        shown, moving = [False], [False]
         scene = QImage(450, 54, QImage.Format_RGB32); scene.fill(QColor('#807060'))
         tracker = SimpleNamespace(find=lambda: 42, client_geometry=lambda hwnd: (0, 0, 1440, 900),
             user32=SimpleNamespace(GetForegroundWindow=lambda: 42))
-        def grab(region): captures.append(region); return hud('1:55') if shown[0] else scene
+        def grab(region):
+            captures.append(region)
+            if region == pause_timer_region((0, 0, 1440, 900)):
+                return timer_frame('1:24' if moving[0] else '1:25', red=False)
+            return banner() if shown[0] else scene
         def read(image): ocr_calls.append(True); return 'CT队暂停还0：'
         source = SimpleNamespace(grab=grab, close=lambda: None)
         reader = SimpleNamespace(read=read, close=lambda: None)
@@ -351,11 +441,13 @@ class PauseWorkerTests(unittest.TestCase):
             base.pump(650)
             self.assertFalse(ocr_calls)
             self.assertFalse(any(r[1] for r in detections))
-            self.assertLessEqual(len(captures), 2)
+            self.assertLessEqual(len(captures), 4)
             shown[0] = True; base.pump(1250)
             self.assertTrue(any(r[1] for r in detections))
             self.assertTrue(ocr_calls)
-            shown[0] = False
+            shown[0] = False; base.pump(600)
+            self.assertTrue(detections[-1][1])
+            moving[0] = True
             end = time.monotonic()+2
             while detections[-1][1] and time.monotonic() < end:
                 at = time.monotonic()
@@ -363,7 +455,8 @@ class PauseWorkerTests(unittest.TestCase):
                 monitor.set_pause_context(('map', 1), True, at, True)
                 base.pump(25)
             self.assertFalse(detections[-1][1])
-            self.assertTrue(all(region == pause_banner_region((0, 0, 1440, 900)) for region in captures))
+            self.assertTrue(all(region in (pause_banner_region((0, 0, 1440, 900)),
+                pause_timer_region((0, 0, 1440, 900))) for region in captures))
         finally:
             self.assertTrue(monitor.stop())
 
@@ -396,9 +489,10 @@ class PauseWorkerTests(unittest.TestCase):
             self.assertEqual(len(samples), 1)
             report = samples[0]
             self.assertEqual(report['window_size'], [1440, 900])
-            self.assertEqual(report['dark_fraction'], 1)
-            self.assertIsNone(report['icon'])
-            self.assertEqual(report['ocr_error'], 'OSError')
+            self.assertEqual(report['stage'], 'timer_sample')
+            self.assertEqual(report['timer_kind'], 'unknown')
+            self.assertFalse(report['paused'])
+            self.assertIsNone(report['ocr_error'])  # No OCR attempted for a blank capture.
             self.assertNotIn('private diagnostic', str(report))
             self.assertNotIn('text', report)
             self.assertNotIn('image', report)
@@ -409,7 +503,8 @@ class PauseWorkerTests(unittest.TestCase):
         banner_reads, detected, evidence = [], [], []
         tracker = SimpleNamespace(find=lambda: 42, client_geometry=lambda hwnd: (0, 0, 2560, 1440),
             user32=SimpleNamespace(GetForegroundWindow=lambda: 42))
-        source = SimpleNamespace(grab=lambda region: hud('0:15'), close=lambda: None)
+        source = SimpleNamespace(grab=lambda region: timer_frame(red=False)
+            if region == pause_timer_region((0, 0, 2560, 1440)) else banner(), close=lambda: None)
         def read(image): banner_reads.append(time.monotonic()); return 'T队暂停还剩 0:14'
         reader = SimpleNamespace(read=read, close=lambda: None)
         monitor = RoundClockMonitor(source_factory=lambda: source, tracker_factory=lambda: tracker,
@@ -432,7 +527,7 @@ class PauseWorkerTests(unittest.TestCase):
         detected, phase = [], [False]
         tracker = SimpleNamespace(find=lambda: 42, client_geometry=lambda hwnd: (0, 0, 2560, 1440),
             user32=SimpleNamespace(GetForegroundWindow=lambda: 42))
-        source = SimpleNamespace(grab=lambda region: hud(pause=True) if phase[0] else hud('0:15'), close=lambda: None)
+        source = SimpleNamespace(grab=lambda region: timer_frame(bars=True) if phase[0] else timer_frame(red=False), close=lambda: None)
         def broken_reader(): raise OSError('OCR unavailable')
         monitor = RoundClockMonitor(source_factory=lambda: source, tracker_factory=lambda: tracker,
             pause_reader_factory=broken_reader)
@@ -442,7 +537,7 @@ class PauseWorkerTests(unittest.TestCase):
         monitor.set_pause_context(key, True, time.monotonic())
         monitor.start()
         try:
-            base.pump(150); phase[0] = True; base.pump(850)
+            base.pump(150); phase[0] = True; base.pump(1150)
             self.assertTrue(any(row[1] for row in detected))
         finally:
             self.assertTrue(monitor.stop())
@@ -451,7 +546,7 @@ class PauseWorkerTests(unittest.TestCase):
         captures, closed, detected = [], [], []
         tracker = SimpleNamespace(find=lambda: 42, client_geometry=lambda hwnd: (0, 0, 2560, 1440),
             user32=SimpleNamespace(GetForegroundWindow=lambda: 42))
-        image = hud(pause=True)
+        image = timer_frame(bars=True)
         def grab(region): captures.append(region); return image
         def no_ocr(): raise AssertionError('pause detection must not initialize OCR')
         source = SimpleNamespace(grab=grab, close=lambda: closed.append(True))
@@ -478,7 +573,7 @@ class PauseWorkerTests(unittest.TestCase):
         seen = []
         tracker = SimpleNamespace(find=lambda: 42, client_geometry=lambda hwnd: (0, 0, 2560, 1440),
             user32=SimpleNamespace(GetForegroundWindow=lambda: 42))
-        source = SimpleNamespace(grab=lambda region: hud(pause=True), close=lambda: None)
+        source = SimpleNamespace(grab=lambda region: timer_frame(bars=True), close=lambda: None)
         def broken_ocr(): raise OSError('OCR language unavailable')
         monitor = RoundClockMonitor(reader_factory=broken_ocr, source_factory=lambda: source, tracker_factory=lambda: tracker)
         monitor.pause_sampled.connect(lambda *args: seen.append(args))

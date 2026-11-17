@@ -435,6 +435,10 @@ class MusicEventEngine:
     def confirm_pause_visual(self, paused, observed_at):
         now = self.clock()
         observed_at = number(observed_at)
+        if (paused is False and observed_at is not None and 0 <= now-observed_at <= .75
+                and self.round_paused and self.pause_source == 'hud'):
+            self._end_visual_pause(now)
+            return True
         if (not isinstance(paused, bool) or observed_at is None or not 0 <= now-observed_at <= .75
                 or self.last_update is None or now-self.last_update > 3 or not self.map_name
                 or self.phase not in ('freezetime', 'live') or self.pause_gsi_available or paused == self.round_paused):

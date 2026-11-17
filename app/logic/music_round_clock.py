@@ -13,6 +13,7 @@ from PySide6.QtGui import QImage
 
 from .flash_background import BufferedDesktopFrameSource
 from .game_window import GameWindowTracker
+from .music_pause_timer import TimerAnalyzer, PauseTimerDetector, pause_timer_region
 
 MAX_CLOCK_READS = 8
 BANNER_RECHECK_SECONDS = 5
@@ -303,6 +304,7 @@ class RoundClockMonitor(QObject):
     pause_sampled = Signal(object, bool, float)
     pause_diagnostic = Signal(dict)
     pause_status_changed = Signal(dict)
+    game_visibility_changed = Signal(bool, bool)
 
     def __init__(self, parent=None, reader_factory=None, source_factory=None, tracker_factory=None,
                  pause_reader_factory=None):
@@ -366,9 +368,10 @@ class RoundClockMonitor(QObject):
                 pass
             tracker = self.tracker_factory()
             readings = ClockReadings()
-            pause_readings = PauseReadings()
-            banner_tracker = PauseBannerTracker()
-            banner_source = False
+            timer_analyzer = TimerAnalyzer()
+            timer_detector = PauseTimerDetector()
+            reported_timer_pause = None
+            visibility = None
             last_pause_feedback = None
             key = None
             was_foreground = False
@@ -379,7 +382,6 @@ class RoundClockMonitor(QObject):
             reader_unavailable = False
             pause_reader_unavailable = False
             next_banner = 0
-            banner_visible, banner_at = False, 0
             banner_text_seen = banner_pause_word = banner_clock = False
             pause_ocr_error = None
             while not self._stop.is_set():
@@ -390,37 +392,38 @@ class RoundClockMonitor(QObject):
                 hwnd = None
                 active = False
                 pause_active = False
-                live_pause_watch = False
                 if context:
                     current, active, received, watch = context
                     if current != key:
                         readings.reset()
-                        pause_readings = PauseReadings()
-                        banner_tracker.clear()
-                        banner_source, last_pause_feedback = False, None
-                        banner_visible, banner_at, next_banner = False, 0, 0
+                        timer_analyzer.reset()
+                        timer_detector = PauseTimerDetector()
+                        reported_timer_pause = None
+                        last_pause_feedback = None
+                        next_banner = 0
                         banner_text_seen = banner_pause_word = banner_clock = False
                         self._next_pause_status = 0
                         key = current
                         was_foreground = False
                     pause_active = bool(pause_context and pause_context[0] == key
                                         and pause_context[1] and now-pause_context[2] <= 3)
-                    live_pause_watch = bool(pause_active and pause_context[3])
                     feedback = pause_context[4] if pause_context else None
                     if feedback is not None:
+                        if feedback != last_pause_feedback:
+                            timer_detector.seed(bool(feedback))
                         if last_pause_feedback is True and feedback is False:
-                            # A real GSI/stage transition has ended this pause.
-                            # Cached visual evidence must not reopen it.
-                            pause_readings = PauseReadings()
-                            banner_tracker.clear()
-                            banner_source = banner_visible = False
-                            banner_at = next_banner = 0
+                            next_banner = 0
                         last_pause_feedback = feedback
                     if (active or watch or pause_active) and now - received <= 3:
                         if now - last_find >= 2:
                             game_hwnd, last_find = tracker.find(), now
                         if game_hwnd and tracker.user32.GetForegroundWindow() == game_hwnd:
                             hwnd = game_hwnd
+                    if active or watch or pause_active:
+                        current_visibility = bool(game_hwnd), bool(hwnd)
+                        if current_visibility != visibility:
+                            visibility = current_visibility
+                            self.game_visibility_changed.emit(*current_visibility)
                 if hwnd and not was_foreground:
                     self.resync_requested.emit(key)
                     next_sample = 0
@@ -432,8 +435,7 @@ class RoundClockMonitor(QObject):
                 was_foreground = bool(hwnd)
                 if not hwnd:
                     readings.reset()
-                    pause_readings.reset_pending()
-                    banner_visible, banner_at = False, 0
+                    timer_detector.suspend()
                     if pause_context and pause_context[1]:
                         stage = ('stale_gsi' if now-pause_context[2] > 3 else
                                  'waiting_foreground' if game_hwnd else 'game_window_not_found')
@@ -460,97 +462,48 @@ class RoundClockMonitor(QObject):
                             source = self.source_factory()
                         observed_at = time.monotonic()
                         clock_read = active and attempts < MAX_CLOCK_READS and not reader_unavailable
-                        timer_needed = clock_read or (pause_active and not live_pause_watch and not banner_tracker.ready)
-                        frame = source.grab(round_clock_region(geometry)) if timer_needed else None
+                        frame = source.grab(round_clock_region(geometry)) if clock_read else None
                         frame_valid = frame is not None and not frame.isNull()
                         if tracker.user32.GetForegroundWindow() == hwnd:
                             if pause_active:
-                                icon = pause_icon_visible(frame) if not live_pause_watch else None
-                                banner_frame, candidate = None, None
-                                if live_pause_watch or banner_tracker.ready:
+                                timer_frame = source.grab(pause_timer_region(geometry))
+                                view = timer_analyzer.analyze(timer_frame)
+                                decision = timer_detector.observe(view, observed_at)
+                                evidence = 'timer_bars' if view.kind == 'bars' else 'timer_frozen_red' if decision is True else 'timer_moving'
+                                # The banner is an optional positive hint only.
+                                # Its disappearance (e.g. behind the buy menu)
+                                # can never stop an established pause.
+                                if (decision is None and not timer_detector.paused
+                                        and (view.kind == 'unknown' or not view.red)
+                                        and now >= next_banner and not pause_reader_unavailable):
                                     banner_frame = source.grab(pause_banner_region(geometry))
-                                    candidate = pause_banner_candidate(banner_frame)
-                                tracked = banner_tracker.matches(banner_frame)
-                                fresh_banner = None
-                                if banner_tracker.ready and tracked is False:
-                                    # Recheck a moved/changed label before ending
-                                    # it, while retaining the one-second OCR cap.
-                                    next_banner = min(next_banner, banner_at+1)
-                                if (icon is not True and now >= next_banner and not pause_reader_unavailable
-                                        and (not live_pause_watch or candidate is True)):
-                                    try:
-                                        if pause_reader is None:
-                                            pause_reader = self.pause_reader_factory()
-                                        if banner_frame is None:
-                                            banner_frame = source.grab(pause_banner_region(geometry))
-                                        if banner_frame is not None and not banner_frame.isNull():
+                                    if pause_banner_candidate(banner_frame) is True:
+                                        try:
+                                            if pause_reader is None:
+                                                pause_reader = self.pause_reader_factory()
                                             text = pause_reader.read(banner_frame)
                                             compact = re.sub(r'\s+', '', text).lower().replace('：', ':')
                                             banner_text_seen = bool(compact)
                                             banner_pause_word = '暂停' in compact or 'timeout' in compact or 'paused' in compact
                                             banner_clock = bool(re.search(r'\d{1,2}:[0-5]\d', compact))
-                                            banner_visible = is_pause_banner(text)
-                                            fresh_banner = banner_visible
-                                            banner_at = time.monotonic()
-                                            if banner_visible:
-                                                banner_source = True
-                                                banner_tracker.remember(banner_frame)
-                                                tracked = banner_tracker.matches(banner_frame)
-                                    except Exception as error:
-                                        pause_reader_unavailable = True
-                                        pause_ocr_error = type(error).__name__
-                                    next_banner = time.monotonic()+(BANNER_RECHECK_SECONDS if tracked is True else 1)
-                                banner = tracked is True if banner_tracker.ready else banner_visible and time.monotonic()-banner_at < 1.5
-                                sample_frame = banner_frame if banner_frame is not None else frame
-                                if sample_frame is not None and not sample_frame.isNull():
-                                    if time.monotonic() >= self._next_pause_status:
-                                        thumbnail = sample_frame.scaled(8, 4, Qt.IgnoreAspectRatio, Qt.FastTransformation).convertToFormat(QImage.Format_RGBA8888)
-                                        pixels = np.frombuffer(thumbnail.constBits(), dtype=np.uint8).reshape(-1, 4)[:, :3]
-                                        self._pause_status('captured', window_size=list(geometry[2:]),
-                                            timer_size=[frame.width(), frame.height()] if frame_valid else None,
-                                            live_round=live_pause_watch, banner_candidate=candidate,
-                                            banner_tracked=tracked,
-                                            icon=icon, banner=bool(banner),
-                                            dark_fraction=round(float((pixels.max(axis=1) <= 20).mean()), 3),
-                                            bright_fraction=round(float((pixels.min(axis=1) >= 230).mean()), 3),
-                                            banner_text_seen=banner_text_seen, banner_pause_word=banner_pause_word,
-                                            banner_clock=banner_clock, ocr_error=pause_ocr_error)
-                                else:
-                                    self._pause_status('empty_frame')
-                                observe_now = True
-                                if banner_tracker.ready:
-                                    # A failed OCR read or the ordinary timer is
-                                    # not evidence that this visible label ended.
-                                    visible = tracked
-                                elif banner_source and pause_readings.paused:
-                                    # If no reliable label template was possible,
-                                    # count only independent, fresh OCR results.
-                                    visible = fresh_banner
-                                    observe_now = fresh_banner is not None
-                                elif live_pause_watch:
-                                    if candidate is False:
-                                        visible = False
-                                    elif banner:
-                                        visible = True
-                                    elif candidate is True and banner_at and time.monotonic()-banner_at < 1.5 and not pause_reader_unavailable:
-                                        visible = False
-                                    else:
-                                        visible = None
-                                else:
-                                    visible = True if icon is True or banner else icon
-                                changed = pause_readings.observe(visible, observed_at, end_delay=1.0 if banner_source else .35) if observe_now else None
-                                if changed is not None:
-                                    self.pause_diagnostic.emit({'active': changed, 'icon': icon,
-                                        'banner': bool(banner), 'source': 'hud_icon' if icon is True else 'hud_banner'})
-                                    if changed is False:
-                                        banner_tracker.clear()
-                                        banner_source = banner_visible = False
-                                        banner_at = 0
-                                # Repeat confirmed states in case a queued signal
-                                # was rejected while Esc briefly opened.
-                                if (tracker.user32.GetForegroundWindow() == hwnd
-                                        and (changed is not None or (visible is not None and visible == pause_readings.paused))):
-                                    self.pause_sampled.emit(key, pause_readings.paused, observed_at)
+                                            if is_pause_banner(text):
+                                                timer_detector.seed(True)
+                                                decision, evidence = True, 'hud_banner'
+                                        except Exception as error:
+                                            pause_reader_unavailable = True
+                                            pause_ocr_error = type(error).__name__
+                                    next_banner = time.monotonic()+1
+                                if time.monotonic() >= self._next_pause_status:
+                                    self._pause_status('timer_sample', window_size=list(geometry[2:]),
+                                        timer_kind=view.kind, red=view.red, paused=timer_detector.paused,
+                                        layout_changed=view.layout_changed,
+                                        banner_text_seen=banner_text_seen, banner_pause_word=banner_pause_word,
+                                        banner_clock=banner_clock, ocr_error=pause_ocr_error)
+                                if decision is not None and tracker.user32.GetForegroundWindow() == hwnd:
+                                    if decision != reported_timer_pause:
+                                        reported_timer_pause = decision
+                                        self.pause_diagnostic.emit({'active': decision, 'source': evidence})
+                                    self.pause_sampled.emit(key, decision, observed_at)
                             if clock_read and frame_valid:
                                 attempts += 1
                                 try:
@@ -569,7 +522,7 @@ class RoundClockMonitor(QObject):
                                             self._status('正在读取顶部计时器')
                     elif pause_active:
                         self._pause_status('missing_geometry')
-                    interval = (.5 if live_pause_watch and not pause_readings.paused else .25) if pause_active else (1 if readings.confirmed else .5)
+                    interval = .5 if pause_active else (1 if readings.confirmed else .5)
                     next_sample = time.monotonic()+interval
                 self._stop.wait(.1)
         except Exception as error:
