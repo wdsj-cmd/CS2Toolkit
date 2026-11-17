@@ -7,7 +7,7 @@ from unittest.mock import patch
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFont, QImage, QPainter
 
-from app.logic.music_round_clock import PauseReadings, RoundClockMonitor, WindowsClockReader, PauseBannerReader, pause_icon_visible, is_pause_banner, pause_banner_candidate, pause_banner_region, round_clock_region
+from app.logic.music_round_clock import PauseReadings, PauseBannerTracker, RoundClockMonitor, WindowsClockReader, PauseBannerReader, pause_icon_visible, is_pause_banner, pause_banner_candidate, pause_banner_region, round_clock_region
 from app.logic.music_box_events import MusicEventEngine
 import test_music_timeout as base
 
@@ -25,6 +25,17 @@ def hud(text=None, pause=False, size=(144, 49)):
         painter.drawText(image.rect(), Qt.AlignCenter, text)
     painter.end()
     return image.scaled(*size)
+
+
+def banner(timer='0:44'):
+    image = QImage(450, 54, QImage.Format_RGB32); image.fill(QColor('#807060'))
+    painter = QPainter(image)
+    painter.fillRect(100, 8, 250, 34, QColor('#303030'))
+    font = QFont('Arial'); font.setPixelSize(18); font.setBold(True)
+    painter.setFont(font); painter.setPen(Qt.white)
+    painter.drawText(image.rect(), Qt.AlignCenter, 'T TIMEOUT '+timer)
+    painter.end()
+    return image
 
 
 class PauseIconTests(unittest.TestCase):
@@ -96,6 +107,33 @@ class PauseIconTests(unittest.TestCase):
         self.assertIsNone(readings.observe(False, 3.25))
         self.assertIs(readings.observe(False, 3.5), False)
 
+    def test_confirmed_banner_has_a_longer_independent_absence_check(self):
+        readings = PauseReadings()
+        readings.observe(True, 0); readings.observe(True, .25)
+        for at in (1, 1.3, 1.6, 1.9):
+            self.assertIsNone(readings.observe(False, at, end_delay=1))
+        self.assertIs(readings.observe(False, 2.2, end_delay=1), False)
+
+
+class PauseBannerTrackerTests(unittest.TestCase):
+    def test_changing_time_digits_do_not_end_the_confirmed_label(self):
+        tracker = PauseBannerTracker()
+        self.assertTrue(tracker.remember(banner()))
+        self.assertIs(tracker.matches(banner('0:43')), True)
+        self.assertIs(tracker.matches(banner('0:09')), True)
+        scene = QImage(450, 54, QImage.Format_RGB32); scene.fill(QColor('#807060'))
+        self.assertIs(tracker.matches(scene), False)
+        scene.fill(Qt.white)
+        self.assertIsNone(tracker.matches(scene))
+        tracker.clear()
+        self.assertIsNone(tracker.matches(banner()))
+
+    def test_tracking_cannot_start_from_unreadable_background(self):
+        tracker = PauseBannerTracker()
+        image = QImage(450, 54, QImage.Format_RGB32); image.fill(QColor('#807060'))
+        self.assertFalse(tracker.remember(image))
+        self.assertFalse(tracker.ready)
+
 
 class PauseBannerReaderTests(unittest.TestCase):
     def make_reader(self):
@@ -162,6 +200,44 @@ class HudPauseMusicTests(unittest.TestCase):
         self.assertEqual(self.player.fade_requests, [1200])
         self.player.faded_out.emit()
         self.assertEqual(self.names()[-1], 'round_start')
+
+    def test_intermittent_ocr_misses_do_not_restart_pause_music(self):
+        self.prepare()
+        shown, calls = [True], []
+        picture = banner(); scene = QImage(450, 54, QImage.Format_RGB32); scene.fill(QColor('#807060'))
+        tracker = SimpleNamespace(find=lambda: 42, client_geometry=lambda hwnd: (0, 0, 1440, 900),
+            user32=SimpleNamespace(GetForegroundWindow=lambda: 42))
+        source = SimpleNamespace(grab=lambda region: picture if shown[0] else scene, close=lambda: None)
+        def read(image):
+            calls.append(True)
+            return 'T队暂停还剩0:44' if len(calls) == 1 else 'T 队 停 0：'
+        reader = SimpleNamespace(read=read, close=lambda: None)
+        monitor = RoundClockMonitor(source_factory=lambda: source, tracker_factory=lambda: tracker,
+            pause_reader_factory=lambda: reader)
+        monitor.pause_sampled.connect(self.controller._on_pause_visual)
+        key = ('de_dust2', 1)
+        def pump(seconds):
+            end = time.monotonic()+seconds
+            while time.monotonic() < end:
+                self.packet()
+                now = time.monotonic()
+                monitor.set_context(key, False, now)
+                monitor.set_pause_context(key, True, now, False, self.controller.engine.round_paused)
+                base.pump(25)
+        with patch('app.logic.music_round_clock.BANNER_RECHECK_SECONDS', .3):
+            now = time.monotonic(); monitor.set_context(key, False, now)
+            monitor.set_pause_context(key, True, now, False, False); monitor.start()
+            try:
+                pump(2.2)
+                self.assertGreaterEqual(len(calls), 3)
+                self.assertEqual(self.names().count('timeout'), 1)
+                self.assertFalse(self.player.fade_requests)
+                self.assertTrue(self.controller.engine.round_paused)
+                shown[0] = False; pump(1.8)
+                self.assertEqual(self.player.fade_requests, [1200])
+                self.assertFalse(self.controller.engine.round_paused)
+            finally:
+                self.assertTrue(monitor.stop())
 
     def test_estimated_bomb_timer_does_not_expire_while_live_pause_is_active(self):
         now = [100.0]

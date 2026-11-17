@@ -15,6 +15,7 @@ from .flash_background import BufferedDesktopFrameSource
 from .game_window import GameWindowTracker
 
 MAX_CLOCK_READS = 8
+BANNER_RECHECK_SECONDS = 5
 _PAUSE_BANNER_REJECT = re.compile(r'投票|申请|请求|失败|无法|未开始|未生效|vote|request|failed|timeoutsremaining')
 
 def round_clock_region(geometry):
@@ -120,7 +121,7 @@ class PauseReadings:
         self.count = 0
         self.since = None
 
-    def observe(self, visible, now):
+    def observe(self, visible, now, end_delay=.35):
         if visible is None or visible == self.paused:
             self.reset_pending()
             return None
@@ -128,11 +129,68 @@ class PauseReadings:
             self.candidate, self.count, self.since = visible, 1, now
         else:
             self.count += 1
-        if self.count >= (2 if visible else 3) and now-self.since >= (.15 if visible else .35):
+        if self.count >= (2 if visible else 3) and now-self.since >= (.15 if visible else end_delay):
             self.paused = visible
             self.reset_pending()
             return visible
         return None
+
+
+class PauseBannerTracker:
+    """Track an OCR-confirmed label in memory, excluding its changing digits."""
+    def __init__(self):
+        self.clear()
+
+    def clear(self):
+        self.foreground = self.background = self.reference_low = self.reference_high = None
+
+    @property
+    def ready(self):
+        return self.foreground is not None
+
+    @staticmethod
+    def _patch(image):
+        if image is None or image.isNull():
+            return None
+        sample = image.scaled(200, 32, Qt.IgnoreAspectRatio, Qt.FastTransformation).convertToFormat(QImage.Format_RGBA8888)
+        # The left-of-centre label is stable; the remaining-time digits are
+        # deliberately outside this patch. No full-screen template is retained.
+        return np.frombuffer(sample.constBits(), dtype=np.uint8).reshape(32, 200, 4)[3:27, 50:110, :3].copy()
+
+    def remember(self, image):
+        self.clear()
+        pixels = self._patch(image)
+        if pixels is None:
+            return False
+        high, low = pixels.max(axis=2), pixels.min(axis=2)
+        foreground = (low >= 135) & (high.astype(np.int16)-low <= 90)
+        padded = np.pad(foreground, 1)
+        neighbors = np.logical_or.reduce([padded[y:y+24, x:x+60] for y in range(3) for x in range(3)])
+        background = neighbors & ~foreground & (high <= 145)
+        if not 10 <= foreground.sum() <= foreground.size*.4 or background.sum() < 10:
+            return False
+        self.foreground, self.background = foreground, background
+        self.reference_low, self.reference_high = low.astype(np.int16), high.astype(np.int16)
+        return True
+
+    def matches(self, image):
+        if not self.ready:
+            return None
+        pixels = self._patch(image)
+        if pixels is None:
+            return None
+        high, low = pixels.max(axis=2).astype(np.int16), pixels.min(axis=2).astype(np.int16)
+        if (high <= 20).mean() > .95 or (low >= 230).mean() > .95:
+            return None
+        # Allow one pixel of antialiasing/motion without accepting a blank
+        # bright wall: both the label strokes and their dark surround must fit.
+        plow, phigh = np.pad(low, 1, mode='edge'), np.pad(high, 1, mode='edge')
+        light = np.maximum.reduce([plow[y:y+24, x:x+60] for y in range(3) for x in range(3)])
+        dark = np.minimum.reduce([phigh[y:y+24, x:x+60] for y in range(3) for x in range(3)])
+        fg = (light[self.foreground] >= np.maximum(100, self.reference_low[self.foreground]-45)).mean()
+        bg = (dark[self.background] <= np.minimum(175, self.reference_high[self.background]+55)).mean()
+        contrast = light[self.foreground].mean()-dark[self.background].mean()
+        return bool(fg >= .8 and bg >= .7 and contrast >= 25)
 
 
 class ClockReadings:
@@ -265,9 +323,9 @@ class RoundClockMonitor(QObject):
         with self._lock:
             self._context = key, active, received_at, watch
 
-    def set_pause_context(self, key, active, received_at, live_round=False):
+    def set_pause_context(self, key, active, received_at, live_round=False, confirmed_pause=None):
         with self._lock:
-            self._pause_context = key, active, received_at, live_round
+            self._pause_context = key, active, received_at, live_round, confirmed_pause
 
     def start(self):
         if self._thread and self._thread.is_alive():
@@ -309,6 +367,9 @@ class RoundClockMonitor(QObject):
             tracker = self.tracker_factory()
             readings = ClockReadings()
             pause_readings = PauseReadings()
+            banner_tracker = PauseBannerTracker()
+            banner_source = False
+            last_pause_feedback = None
             key = None
             was_foreground = False
             was_active = False
@@ -335,6 +396,8 @@ class RoundClockMonitor(QObject):
                     if current != key:
                         readings.reset()
                         pause_readings = PauseReadings()
+                        banner_tracker.clear()
+                        banner_source, last_pause_feedback = False, None
                         banner_visible, banner_at, next_banner = False, 0, 0
                         banner_text_seen = banner_pause_word = banner_clock = False
                         self._next_pause_status = 0
@@ -343,6 +406,16 @@ class RoundClockMonitor(QObject):
                     pause_active = bool(pause_context and pause_context[0] == key
                                         and pause_context[1] and now-pause_context[2] <= 3)
                     live_pause_watch = bool(pause_active and pause_context[3])
+                    feedback = pause_context[4] if pause_context else None
+                    if feedback is not None:
+                        if last_pause_feedback is True and feedback is False:
+                            # A real GSI/stage transition has ended this pause.
+                            # Cached visual evidence must not reopen it.
+                            pause_readings = PauseReadings()
+                            banner_tracker.clear()
+                            banner_source = banner_visible = False
+                            banner_at = next_banner = 0
+                        last_pause_feedback = feedback
                     if (active or watch or pause_active) and now - received <= 3:
                         if now - last_find >= 2:
                             game_hwnd, last_find = tracker.find(), now
@@ -387,16 +460,22 @@ class RoundClockMonitor(QObject):
                             source = self.source_factory()
                         observed_at = time.monotonic()
                         clock_read = active and attempts < MAX_CLOCK_READS and not reader_unavailable
-                        timer_needed = clock_read or (pause_active and not live_pause_watch)
+                        timer_needed = clock_read or (pause_active and not live_pause_watch and not banner_tracker.ready)
                         frame = source.grab(round_clock_region(geometry)) if timer_needed else None
                         frame_valid = frame is not None and not frame.isNull()
                         if tracker.user32.GetForegroundWindow() == hwnd:
                             if pause_active:
                                 icon = pause_icon_visible(frame) if not live_pause_watch else None
                                 banner_frame, candidate = None, None
-                                if live_pause_watch:
+                                if live_pause_watch or banner_tracker.ready:
                                     banner_frame = source.grab(pause_banner_region(geometry))
                                     candidate = pause_banner_candidate(banner_frame)
+                                tracked = banner_tracker.matches(banner_frame)
+                                fresh_banner = None
+                                if banner_tracker.ready and tracked is False:
+                                    # Recheck a moved/changed label before ending
+                                    # it, while retaining the one-second OCR cap.
+                                    next_banner = min(next_banner, banner_at+1)
                                 if (icon is not True and now >= next_banner and not pause_reader_unavailable
                                         and (not live_pause_watch or candidate is True)):
                                     try:
@@ -411,13 +490,18 @@ class RoundClockMonitor(QObject):
                                             banner_pause_word = '暂停' in compact or 'timeout' in compact or 'paused' in compact
                                             banner_clock = bool(re.search(r'\d{1,2}:[0-5]\d', compact))
                                             banner_visible = is_pause_banner(text)
+                                            fresh_banner = banner_visible
                                             banner_at = time.monotonic()
+                                            if banner_visible:
+                                                banner_source = True
+                                                banner_tracker.remember(banner_frame)
+                                                tracked = banner_tracker.matches(banner_frame)
                                     except Exception as error:
                                         pause_reader_unavailable = True
                                         pause_ocr_error = type(error).__name__
-                                    next_banner = time.monotonic()+1
-                                banner = banner_visible and time.monotonic()-banner_at < 1.5
-                                sample_frame = banner_frame if live_pause_watch else frame
+                                    next_banner = time.monotonic()+(BANNER_RECHECK_SECONDS if tracked is True else 1)
+                                banner = tracked is True if banner_tracker.ready else banner_visible and time.monotonic()-banner_at < 1.5
+                                sample_frame = banner_frame if banner_frame is not None else frame
                                 if sample_frame is not None and not sample_frame.isNull():
                                     if time.monotonic() >= self._next_pause_status:
                                         thumbnail = sample_frame.scaled(8, 4, Qt.IgnoreAspectRatio, Qt.FastTransformation).convertToFormat(QImage.Format_RGBA8888)
@@ -425,6 +509,7 @@ class RoundClockMonitor(QObject):
                                         self._pause_status('captured', window_size=list(geometry[2:]),
                                             timer_size=[frame.width(), frame.height()] if frame_valid else None,
                                             live_round=live_pause_watch, banner_candidate=candidate,
+                                            banner_tracked=tracked,
                                             icon=icon, banner=bool(banner),
                                             dark_fraction=round(float((pixels.max(axis=1) <= 20).mean()), 3),
                                             bright_fraction=round(float((pixels.min(axis=1) >= 230).mean()), 3),
@@ -432,7 +517,17 @@ class RoundClockMonitor(QObject):
                                             banner_clock=banner_clock, ocr_error=pause_ocr_error)
                                 else:
                                     self._pause_status('empty_frame')
-                                if live_pause_watch:
+                                observe_now = True
+                                if banner_tracker.ready:
+                                    # A failed OCR read or the ordinary timer is
+                                    # not evidence that this visible label ended.
+                                    visible = tracked
+                                elif banner_source and pause_readings.paused:
+                                    # If no reliable label template was possible,
+                                    # count only independent, fresh OCR results.
+                                    visible = fresh_banner
+                                    observe_now = fresh_banner is not None
+                                elif live_pause_watch:
                                     if candidate is False:
                                         visible = False
                                     elif banner:
@@ -443,10 +538,14 @@ class RoundClockMonitor(QObject):
                                         visible = None
                                 else:
                                     visible = True if icon is True or banner else icon
-                                changed = pause_readings.observe(visible, observed_at)
+                                changed = pause_readings.observe(visible, observed_at, end_delay=1.0 if banner_source else .35) if observe_now else None
                                 if changed is not None:
                                     self.pause_diagnostic.emit({'active': changed, 'icon': icon,
                                         'banner': bool(banner), 'source': 'hud_icon' if icon is True else 'hud_banner'})
+                                    if changed is False:
+                                        banner_tracker.clear()
+                                        banner_source = banner_visible = False
+                                        banner_at = 0
                                 # Repeat confirmed states in case a queued signal
                                 # was rejected while Esc briefly opened.
                                 if (tracker.user32.GetForegroundWindow() == hwnd

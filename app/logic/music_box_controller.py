@@ -180,7 +180,7 @@ class MusicBoxController(QObject):
                 'not_team_menu': not self._team_menu_open, 'playable_phase': self.engine.phase in ('freezetime', 'live'),
                 'needs_visual': not self.engine.pause_gsi_available, 'has_timeout_clip': bool(clips)}
             pause_watch = all(checks.values())
-            self.clock_monitor.set_pause_context(key, pause_watch, received, self.engine.phase == 'live')
+            self.clock_monitor.set_pause_context(key, pause_watch, received, self.engine.phase == 'live', self.engine.round_paused)
             signature = tuple(checks.values()), len(clips), self.engine.phase, self.previewing
             if signature != self._pause_watch_signature:
                 self._pause_watch_signature = signature
