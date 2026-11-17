@@ -105,9 +105,11 @@ class MusicEventEngine:
         self.round_paused = False
         self.pause_source = ''
         self.pause_field = ''
+        self.pause_round_phase = ''
         self.pause_gsi_available = False
         self.paused_at = None
         self.round_estimated = self.bomb_estimated = False
+        self._bomb_pause_seconds = 0
         self.round_deadline = self.bomb_deadline = None
         self.round_clock_source = ''
         self.ten_played = set()
@@ -156,10 +158,12 @@ class MusicEventEngine:
             self.round_paused = False
             self.pause_source = ''
             self.pause_field = ''
+            self.pause_round_phase = ''
             self.pause_gsi_available = False
             self.paused_at = None
             self.ten_played.clear()
             self.round_deadline = self.bomb_deadline = None
+            self._bomb_pause_seconds = 0
             self.round_clock_source = ''
             self.round_number = round_number
             self.planting_player = self.planter_id = ''
@@ -288,6 +292,7 @@ class MusicEventEngine:
             self.round_paused = False
             self.pause_source = ''
             self.pause_field = ''
+            self.pause_round_phase = ''
             self.pause_gsi_available = False
             self.paused_at = None
             if self.activity != 'menu' or not self.current_cue or self.current_cue.event != 'main_menu':
@@ -298,6 +303,7 @@ class MusicEventEngine:
             self.selecting_team = self.team_selection_done = False
             self.health = self.mvps = None
             self.round_deadline = self.bomb_deadline = None
+            self._bomb_pause_seconds = 0
             self.round_clock_source = ''
             self.bomb_state = ''
             self.planting_player = self.planter_id = ''
@@ -323,6 +329,7 @@ class MusicEventEngine:
                 candidates.append('freeze_time')
                 self.ten_played.clear()
                 self.round_deadline = self.bomb_deadline = None
+                self._bomb_pause_seconds = 0
                 self.round_clock_source = ''
                 self.planting_player = self.planter_id = ''
                 self.planter_source = ''
@@ -332,6 +339,7 @@ class MusicEventEngine:
             elif phase == 'live' and self.phase == 'freezetime':
                 candidates.append('round_start')
             if planted and self.bomb_state not in ('planted', 'defusing'):
+                self._bomb_pause_seconds = 0
                 self.round_deadline = None
                 self.round_clock_source = ''
                 candidates.append('bomb_planted')
@@ -346,7 +354,7 @@ class MusicEventEngine:
                     self.bomb_estimated = True
             if self.bomb_estimated and self.local_plant_time is not None:
                 anchor = self.local_plant_time if self.visual_plant_time is None else min(self.local_plant_time, self.visual_plant_time)
-                self.bomb_deadline = anchor + self.bomb_seconds
+                self.bomb_deadline = anchor + self.bomb_seconds + self._bomb_pause_seconds
                 self.bomb_timer_compensation_ms = 0
             if (health == 0 and self.health is not None and self.health > 0
                     and phase == 'live' and not planted):
@@ -383,9 +391,10 @@ class MusicEventEngine:
                     and object_node(state.get(self.pause_field)).get('phase') in ('live', 'freezetime', 'over', 'gameover', 'warmup')):
                 self.round_paused = self.pause_gsi_available = False
                 self.pause_source = self.pause_field = ''
-            elif self.pause_source == 'hud' and phase and phase != 'freezetime':
-                self.round_paused = False
-                self.pause_source = self.pause_field = ''
+            elif (self.pause_source == 'hud' and phase
+                  and (phase not in ('freezetime', 'live')
+                       or self.pause_round_phase == 'freezetime' and phase == 'live')):
+                self._end_visual_pause(now)
             if self.round_paused and self.paused_at is None:
                 self.paused_at = now
                 self.round_deadline = None
@@ -428,16 +437,30 @@ class MusicEventEngine:
         observed_at = number(observed_at)
         if (not isinstance(paused, bool) or observed_at is None or not 0 <= now-observed_at <= .75
                 or self.last_update is None or now-self.last_update > 3 or not self.map_name
-                or self.phase != 'freezetime' or self.pause_gsi_available or paused == self.round_paused):
+                or self.phase not in ('freezetime', 'live') or self.pause_gsi_available or paused == self.round_paused):
             return False
+        if not paused:
+            self._end_visual_pause(now)
+            return True
         self.round_paused = paused
         self.pause_source = 'hud' if paused else ''
         self.pause_field = 'visual' if paused else ''
+        self.pause_round_phase = self.phase
         self.paused_at = now if paused else None
         if paused:
             self.round_deadline = None
             self.round_clock_source = ''
         return True
+
+    def _end_visual_pause(self, now):
+        if (self.paused_at is not None and self.bomb_estimated and self.bomb_deadline is not None
+                and self.bomb_state in ('planted', 'defusing')):
+            elapsed = max(0, now-self.paused_at)
+            self._bomb_pause_seconds += elapsed
+            self.bomb_deadline += elapsed
+        self.round_paused = False
+        self.pause_source = self.pause_field = self.pause_round_phase = ''
+        self.paused_at = None
 
     def confirm_round_clock(self, seconds, observed_at):
         now = self.clock()

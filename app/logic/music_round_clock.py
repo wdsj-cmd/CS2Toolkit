@@ -1,4 +1,4 @@
-"""Read only the visible HUD timer when GSI supplies no round countdown."""
+"""Read small visible HUD regions when GSI omits clock or pause state."""
 import asyncio
 import ctypes
 import math
@@ -15,6 +15,7 @@ from .flash_background import BufferedDesktopFrameSource
 from .game_window import GameWindowTracker
 
 MAX_CLOCK_READS = 8
+_PAUSE_BANNER_REJECT = re.compile(r'投票|申请|请求|失败|无法|未开始|未生效|vote|request|failed|timeoutsremaining')
 
 def round_clock_region(geometry):
     x, y, width, height = geometry
@@ -36,12 +37,30 @@ def pause_banner_region(geometry):
 def is_pause_banner(text):
     """Only the active-pause banner, not vote requests or menu commands."""
     compact = re.sub(r'\s+', '', str(text)).lower().replace('：', ':')
-    if re.search(r'投票|申请|请求|失败|无法|vote|request|failed|timeoutsremaining', compact):
+    if _PAUSE_BANNER_REJECT.search(compact):
         return False
+    # At small HUD sizes OCR can read the team and "暂停还" while losing
+    # "剩" or the digits. That active-team banner is already unambiguous;
+    # requiring an exact remaining-time sentence discarded real timeouts.
+    team_remaining = re.search(r'^(?:ct|t|反恐精英|恐怖分子)(?:队伍|队|方)?暂停(?:还|剩)', compact)
     clock = bool(re.search(r'\d{1,2}:[0-5]\d', compact))
-    return bool((clock and ('暂停还剩' in compact or '暂停剩余' in compact
+    return bool(team_remaining or (clock and ('暂停还剩' in compact or '暂停剩余' in compact
                             or 'timeoutremaining' in compact or 'timeout' in compact))
                 or compact in ('比赛已暂停', '技术暂停', 'matchpaused', 'technicaltimeout', 'technicalpause'))
+
+
+def pause_banner_candidate(image):
+    """Cheap text/contrast precheck before live-round OCR, never a music cue."""
+    if image is None or image.isNull():
+        return None
+    sample = image.scaled(200, 32, Qt.IgnoreAspectRatio, Qt.FastTransformation).convertToFormat(QImage.Format_RGBA8888)
+    pixels = np.frombuffer(sample.constBits(), dtype=np.uint8).reshape(32, 200, 4)[:, :, :3]
+    high, low = pixels.max(axis=2), pixels.min(axis=2)
+    if (high <= 20).mean() > .95 or (low >= 230).mean() > .90:
+        return None
+    white = (low >= 135) & (high.astype(np.int16)-low <= 90)
+    rows = (white.sum(axis=1) >= 4).sum()
+    return bool(white.sum() >= 20 and rows >= 3 and (high <= 155).mean() >= .15)
 
 
 def pause_icon_visible(image):
@@ -172,10 +191,10 @@ class WindowsClockReader:
                 self._com.RoUninitialize()
             raise
 
-    async def _recognize(self, image):
+    async def _recognize(self, image, transformation=Qt.SmoothTransformation):
         from winrt.windows.graphics.imaging import BitmapAlphaMode, BitmapPixelFormat, SoftwareBitmap
         from winrt.windows.storage.streams import DataWriter
-        scaled = image.scaled(image.width() * self.scale, image.height() * self.scale, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        scaled = image.scaled(image.width() * self.scale, image.height() * self.scale, Qt.IgnoreAspectRatio, transformation)
         scaled = scaled.convertToFormat(QImage.Format_ARGB32)
         writer = DataWriter()
         writer.write_bytes(bytes(scaled.constBits()))
@@ -189,14 +208,34 @@ class WindowsClockReader:
         finally:
             bitmap.close()
 
-    def read(self, image):
-        return self.loop.run_until_complete(self._recognize(image))
+    def read(self, image, transformation=Qt.SmoothTransformation):
+        return self.loop.run_until_complete(self._recognize(image, transformation))
 
     def close(self):
         self.engine = None
         self.loop.close()
         if self._uninitialize:
             self._com.RoUninitialize()
+
+
+class PauseBannerReader(WindowsClockReader):
+    def __init__(self):
+        super().__init__(language='zh-Hans-CN', scale=2)
+
+    def read(self, image):
+        text = super().read(image)
+        compact = re.sub(r'\s+', '', text).lower()
+        if is_pause_banner(text) or _PAUSE_BANNER_REJECT.search(compact):
+            return text
+        # Preserve the small pixel-font strokes only when the first pass
+        # already resembles a pause banner. Normal scenery gets no extra OCR.
+        hint = ('队' in compact and ('停' in compact or '还' in compact)
+                or 'timeout' in compact or 'paused' in compact)
+        if hint:
+            crisp = super().read(image, Qt.FastTransformation)
+            if is_pause_banner(crisp):
+                return crisp
+        return text
 
 
 class RoundClockMonitor(QObject):
@@ -213,7 +252,7 @@ class RoundClockMonitor(QObject):
         self.reader_factory = reader_factory or WindowsClockReader
         self.source_factory = source_factory or BufferedDesktopFrameSource
         self.tracker_factory = tracker_factory or GameWindowTracker
-        self.pause_reader_factory = pause_reader_factory or (lambda: WindowsClockReader(language='zh-Hans-CN', scale=2))
+        self.pause_reader_factory = pause_reader_factory or PauseBannerReader
         self._lock = threading.Lock()
         self._context = None
         self._pause_context = None
@@ -226,9 +265,9 @@ class RoundClockMonitor(QObject):
         with self._lock:
             self._context = key, active, received_at, watch
 
-    def set_pause_context(self, key, active, received_at):
+    def set_pause_context(self, key, active, received_at, live_round=False):
         with self._lock:
-            self._pause_context = key, active, received_at
+            self._pause_context = key, active, received_at, live_round
 
     def start(self):
         if self._thread and self._thread.is_alive():
@@ -290,6 +329,7 @@ class RoundClockMonitor(QObject):
                 hwnd = None
                 active = False
                 pause_active = False
+                live_pause_watch = False
                 if context:
                     current, active, received, watch = context
                     if current != key:
@@ -302,6 +342,7 @@ class RoundClockMonitor(QObject):
                         was_foreground = False
                     pause_active = bool(pause_context and pause_context[0] == key
                                         and pause_context[1] and now-pause_context[2] <= 3)
+                    live_pause_watch = bool(pause_active and pause_context[3])
                     if (active or watch or pause_active) and now - received <= 3:
                         if now - last_find >= 2:
                             game_hwnd, last_find = tracker.find(), now
@@ -345,70 +386,92 @@ class RoundClockMonitor(QObject):
                         if source is None:
                             source = self.source_factory()
                         observed_at = time.monotonic()
-                        frame = source.grab(round_clock_region(geometry))
-                        if frame is not None and not frame.isNull():
-                            if tracker.user32.GetForegroundWindow() == hwnd:
-                                if pause_active:
-                                    icon = pause_icon_visible(frame)
-                                    if icon is not True and now >= next_banner and not pause_reader_unavailable:
-                                        try:
-                                            if pause_reader is None:
-                                                pause_reader = self.pause_reader_factory()
+                        clock_read = active and attempts < MAX_CLOCK_READS and not reader_unavailable
+                        timer_needed = clock_read or (pause_active and not live_pause_watch)
+                        frame = source.grab(round_clock_region(geometry)) if timer_needed else None
+                        frame_valid = frame is not None and not frame.isNull()
+                        if tracker.user32.GetForegroundWindow() == hwnd:
+                            if pause_active:
+                                icon = pause_icon_visible(frame) if not live_pause_watch else None
+                                banner_frame, candidate = None, None
+                                if live_pause_watch:
+                                    banner_frame = source.grab(pause_banner_region(geometry))
+                                    candidate = pause_banner_candidate(banner_frame)
+                                if (icon is not True and now >= next_banner and not pause_reader_unavailable
+                                        and (not live_pause_watch or candidate is True)):
+                                    try:
+                                        if pause_reader is None:
+                                            pause_reader = self.pause_reader_factory()
+                                        if banner_frame is None:
                                             banner_frame = source.grab(pause_banner_region(geometry))
-                                            if banner_frame is not None and not banner_frame.isNull():
-                                                text = pause_reader.read(banner_frame)
-                                                compact = re.sub(r'\s+', '', text).lower().replace('：', ':')
-                                                banner_text_seen = bool(compact)
-                                                banner_pause_word = '暂停' in compact or 'timeout' in compact or 'paused' in compact
-                                                banner_clock = bool(re.search(r'\d{1,2}:[0-5]\d', compact))
-                                                banner_visible = is_pause_banner(text)
-                                                banner_at = time.monotonic()
-                                        except Exception as error:
-                                            pause_reader_unavailable = True
-                                            pause_ocr_error = type(error).__name__
-                                        next_banner = time.monotonic()+1
-                                    banner = banner_visible and time.monotonic()-banner_at < 1.5
+                                        if banner_frame is not None and not banner_frame.isNull():
+                                            text = pause_reader.read(banner_frame)
+                                            compact = re.sub(r'\s+', '', text).lower().replace('：', ':')
+                                            banner_text_seen = bool(compact)
+                                            banner_pause_word = '暂停' in compact or 'timeout' in compact or 'paused' in compact
+                                            banner_clock = bool(re.search(r'\d{1,2}:[0-5]\d', compact))
+                                            banner_visible = is_pause_banner(text)
+                                            banner_at = time.monotonic()
+                                    except Exception as error:
+                                        pause_reader_unavailable = True
+                                        pause_ocr_error = type(error).__name__
+                                    next_banner = time.monotonic()+1
+                                banner = banner_visible and time.monotonic()-banner_at < 1.5
+                                sample_frame = banner_frame if live_pause_watch else frame
+                                if sample_frame is not None and not sample_frame.isNull():
                                     if time.monotonic() >= self._next_pause_status:
-                                        thumbnail = frame.scaled(8, 4, Qt.IgnoreAspectRatio, Qt.FastTransformation).convertToFormat(QImage.Format_RGBA8888)
+                                        thumbnail = sample_frame.scaled(8, 4, Qt.IgnoreAspectRatio, Qt.FastTransformation).convertToFormat(QImage.Format_RGBA8888)
                                         pixels = np.frombuffer(thumbnail.constBits(), dtype=np.uint8).reshape(-1, 4)[:, :3]
                                         self._pause_status('captured', window_size=list(geometry[2:]),
-                                            timer_size=[frame.width(), frame.height()], icon=icon, banner=bool(banner),
+                                            timer_size=[frame.width(), frame.height()] if frame_valid else None,
+                                            live_round=live_pause_watch, banner_candidate=candidate,
+                                            icon=icon, banner=bool(banner),
                                             dark_fraction=round(float((pixels.max(axis=1) <= 20).mean()), 3),
                                             bright_fraction=round(float((pixels.min(axis=1) >= 230).mean()), 3),
                                             banner_text_seen=banner_text_seen, banner_pause_word=banner_pause_word,
                                             banner_clock=banner_clock, ocr_error=pause_ocr_error)
-                                    visible = True if icon is True or banner else icon
-                                    changed = pause_readings.observe(visible, observed_at)
-                                    if changed is not None:
-                                        self.pause_diagnostic.emit({'active': changed, 'icon': icon,
-                                            'banner': bool(banner), 'source': 'hud_icon' if icon is True else 'hud_banner'})
-                                    # Repeat a confirmed visible state: a queued signal
-                                    # may have been rejected while Esc briefly opened.
-                                    if (tracker.user32.GetForegroundWindow() == hwnd
-                                            and (changed is not None or (visible is not None and visible == pause_readings.paused))):
-                                        self.pause_sampled.emit(key, pause_readings.paused, observed_at)
-                                if active and attempts < MAX_CLOCK_READS and not reader_unavailable:
-                                    attempts += 1
-                                    try:
-                                        if reader is None:
-                                            reader = self.reader_factory()
-                                        text = reader.read(frame)
-                                    except Exception:
-                                        # Missing Windows OCR must not disable the
-                                        # independent, pixel-only pause detector.
-                                        reader_unavailable = True
-                                        self._status('系统文字识别不可用')
+                                else:
+                                    self._pause_status('empty_frame')
+                                if live_pause_watch:
+                                    if candidate is False:
+                                        visible = False
+                                    elif banner:
+                                        visible = True
+                                    elif candidate is True and banner_at and time.monotonic()-banner_at < 1.5 and not pause_reader_unavailable:
+                                        visible = False
                                     else:
-                                        if tracker.user32.GetForegroundWindow() == hwnd:
-                                            value = readings.observe(text, observed_at)
-                                            if value is not None:
-                                                self.sampled.emit(key, value, readings.anchor_at)
-                                                self._status('正在读取顶部计时器')
-                        elif pause_active:
-                            self._pause_status('empty_frame')
+                                        visible = None
+                                else:
+                                    visible = True if icon is True or banner else icon
+                                changed = pause_readings.observe(visible, observed_at)
+                                if changed is not None:
+                                    self.pause_diagnostic.emit({'active': changed, 'icon': icon,
+                                        'banner': bool(banner), 'source': 'hud_icon' if icon is True else 'hud_banner'})
+                                # Repeat confirmed states in case a queued signal
+                                # was rejected while Esc briefly opened.
+                                if (tracker.user32.GetForegroundWindow() == hwnd
+                                        and (changed is not None or (visible is not None and visible == pause_readings.paused))):
+                                    self.pause_sampled.emit(key, pause_readings.paused, observed_at)
+                            if clock_read and frame_valid:
+                                attempts += 1
+                                try:
+                                    if reader is None:
+                                        reader = self.reader_factory()
+                                    text = reader.read(frame)
+                                except Exception:
+                                    # Missing OCR must not disable pause detection.
+                                    reader_unavailable = True
+                                    self._status('系统文字识别不可用')
+                                else:
+                                    if tracker.user32.GetForegroundWindow() == hwnd:
+                                        value = readings.observe(text, observed_at)
+                                        if value is not None:
+                                            self.sampled.emit(key, value, readings.anchor_at)
+                                            self._status('正在读取顶部计时器')
                     elif pause_active:
                         self._pause_status('missing_geometry')
-                    next_sample = time.monotonic() + (.25 if pause_active else (1 if readings.confirmed else .5))
+                    interval = (.5 if live_pause_watch and not pause_readings.paused else .25) if pause_active else (1 if readings.confirmed else .5)
+                    next_sample = time.monotonic()+interval
                 self._stop.wait(.1)
         except Exception as error:
             if self._pause_context and self._pause_context[1]:

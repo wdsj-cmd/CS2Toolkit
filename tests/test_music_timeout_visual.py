@@ -2,11 +2,13 @@ import threading
 import time
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFont, QImage, QPainter
 
-from app.logic.music_round_clock import PauseReadings, RoundClockMonitor, pause_icon_visible, is_pause_banner, pause_banner_region, round_clock_region
+from app.logic.music_round_clock import PauseReadings, RoundClockMonitor, WindowsClockReader, PauseBannerReader, pause_icon_visible, is_pause_banner, pause_banner_candidate, pause_banner_region, round_clock_region
+from app.logic.music_box_events import MusicEventEngine
 import test_music_timeout as base
 
 
@@ -36,6 +38,15 @@ class PauseIconTests(unittest.TestCase):
             self.assertFalse(is_pause_banner(text), text)
         self.assertEqual(pause_banner_region((0, 0, 2560, 1440)), (920, 994, 720, 86))
 
+    def test_active_team_banner_survives_actual_small_font_ocr_corruption(self):
+        # Real OCR result from the reported small HUD, with no player data.
+        for text in ('T 队 暂 停 还 9 闫 4', 'CT队暂停还刂0：', 'T队暂停剩余',
+                     'ct 队 暂 停 还', '反恐精英队暂停还剩0:09'):
+            self.assertTrue(is_pause_banner(text), text)
+        for text in ('T队暂停', 'CT队暂停请求0:30', 'T队暂停还未开始0:44',
+                     'T队暂停还未生效0:44', '投票通过：T队暂停还剩0:44', 'CT队准备还剩0:44'):
+            self.assertFalse(is_pause_banner(text), text)
+
     def test_pause_symbol_at_multiple_hud_resolutions(self):
         for size in ((144, 49), (108, 37), (192, 65), (72, 25)):
             self.assertIs(pause_icon_visible(hud(pause=True, size=size)), True)
@@ -63,6 +74,16 @@ class PauseIconTests(unittest.TestCase):
         self.assertIsNone(pause_icon_visible(None))
         self.assertIsNone(pause_icon_visible(QImage()))
 
+    def test_live_banner_precheck_is_not_itself_a_pause_trigger(self):
+        image = QImage(450, 54, QImage.Format_RGB32)
+        image.fill(QColor('#807060'))
+        self.assertIs(pause_banner_candidate(image), False)
+        for color in (Qt.white, Qt.black):
+            image.fill(color)
+            self.assertIsNone(pause_banner_candidate(image))
+        self.assertIs(pause_banner_candidate(hud('1:55')), True)
+        self.assertFalse(is_pause_banner('1:55'))
+
     def test_debounce_requires_visible_confirmations_and_retains_pause_while_obscured(self):
         readings = PauseReadings()
         self.assertIsNone(readings.observe(True, 0))
@@ -74,6 +95,32 @@ class PauseIconTests(unittest.TestCase):
         self.assertIsNone(readings.observe(False, 3))
         self.assertIsNone(readings.observe(False, 3.25))
         self.assertIs(readings.observe(False, 3.5), False)
+
+
+class PauseBannerReaderTests(unittest.TestCase):
+    def make_reader(self):
+        with patch.object(WindowsClockReader, '__init__', return_value=None):
+            return PauseBannerReader()
+
+    def test_suspected_small_pause_text_retries_with_crisp_scaling(self):
+        reader = self.make_reader()
+        with patch.object(WindowsClockReader, 'read', side_effect=['T 队 停 还 0 ：', 'T 队 暂 停 还 9 闫 4']) as read:
+            text = reader.read(QImage())
+            self.assertTrue(is_pause_banner(text))
+            self.assertEqual(read.call_count, 2)
+            self.assertEqual(read.call_args_list[1].args[1], Qt.FastTransformation)
+
+    def test_already_recognized_banners_and_ordinary_scenery_need_one_pass(self):
+        for text in ('T队暂停还剩0:44', 'CT队暂停还', '', '准备阶段', '无关地图画面'):
+            with self.subTest(text=text), patch.object(WindowsClockReader, 'read', return_value=text) as read:
+                self.assertEqual(self.make_reader().read(QImage()), text)
+                self.assertEqual(read.call_count, 1)
+
+    def test_vote_or_not_yet_active_text_cannot_be_retried_into_a_false_positive(self):
+        for text in ('投票：T队暂停还剩0:44', '请求CT队暂停还剩0:44', 'T队暂停还未生效0:44'):
+            with self.subTest(text=text), patch.object(WindowsClockReader, 'read', side_effect=[text, 'T队暂停还剩0:44']) as read:
+                self.assertFalse(is_pause_banner(self.make_reader().read(QImage())))
+                self.assertEqual(read.call_count, 1)
 
 
 class HudPauseMusicTests(unittest.TestCase):
@@ -104,6 +151,40 @@ class HudPauseMusicTests(unittest.TestCase):
         self.assertEqual(self.player.fade_requests, [1200])
         self.player.faded_out.emit()
         self.assertEqual(self.names()[-1], 'round_start')
+
+    def test_live_pause_survives_live_heartbeats_and_fades_when_banner_clears(self):
+        self.prepare(); self.packet(phase='live'); self.visual(True)
+        self.assertEqual(self.names()[-1], 'timeout')
+        for _ in range(4): self.packet(phase='live')
+        self.assertTrue(self.controller.engine.round_paused)
+        self.assertFalse(self.player.fade_requests)
+        self.visual(False)
+        self.assertEqual(self.player.fade_requests, [1200])
+        self.player.faded_out.emit()
+        self.assertEqual(self.names()[-1], 'round_start')
+
+    def test_estimated_bomb_timer_does_not_expire_while_live_pause_is_active(self):
+        now = [100.0]
+        engine = MusicEventEngine(clock=lambda: now[0])
+        packet = {'provider': {'steamid': 'self'}, 'map': {'name': 'de_dust2', 'round': 1, 'phase': 'live'},
+                  'round': {'phase': 'live'}, 'player': {'steamid': 'self', 'team': 'T', 'activity': 'playing',
+                                                        'state': {'health': 100}}}
+        engine.process(packet)
+        packet['round']['bomb'] = 'planted'; engine.process(packet)
+        engine.local_plant_time = now[0]
+        engine.visual_plant_time = now[0]
+        before = engine.bomb_deadline
+        self.assertIsNotNone(before)
+        self.assertTrue(engine.confirm_pause_visual(True, now[0]))
+        now[0] += 60; engine.process(packet)
+        self.assertTrue(engine.round_paused)
+        self.assertTrue(engine.confirm_pause_visual(False, now[0]))
+        self.assertEqual(engine.bomb_deadline, before+60)
+        self.assertEqual(engine.bomb_deadline-now[0], 40)
+        engine.process(packet)
+        self.assertEqual(engine.bomb_deadline, before+60)
+        self.assertEqual(engine.local_plant_time, 100)
+        self.assertEqual(engine.visual_plant_time, 100)
 
     def test_stale_foreign_obscured_and_esc_callbacks_do_not_start_music(self):
         self.prepare()
@@ -136,7 +217,7 @@ class HudPauseMusicTests(unittest.TestCase):
                 self.assertFalse(self.controller.engine.round_paused)
                 self.player.faded_out.emit()
 
-    def test_pause_watch_only_runs_with_timeout_clip_during_freezetime(self):
+    def test_pause_watch_only_runs_with_timeout_clip_in_playable_stages(self):
         self.prepare(clip=False)
         self.assertFalse(self.controller.clock_monitor.pause_context[1])
         self.assign('timeout', duration=0, loop=True); self.packet()
@@ -144,6 +225,9 @@ class HudPauseMusicTests(unittest.TestCase):
         self.packet(activity='menu')
         self.assertFalse(self.controller.clock_monitor.pause_context[1])
         self.packet(phase='live')
+        self.assertTrue(self.controller.clock_monitor.pause_context[1])
+        self.assertTrue(self.controller.clock_monitor.pause_context[3])
+        self.packet(phase='over')
         self.assertFalse(self.controller.clock_monitor.pause_context[1])
 
     def test_new_round_rejects_old_visual_confirmation(self):
@@ -171,6 +255,42 @@ class HudPauseMusicTests(unittest.TestCase):
 
 
 class PauseWorkerTests(unittest.TestCase):
+    def test_live_round_uses_only_small_banner_and_no_ocr_for_scenery(self):
+        captures, ocr_calls, detections = [], [], []
+        shown = [False]
+        scene = QImage(450, 54, QImage.Format_RGB32); scene.fill(QColor('#807060'))
+        tracker = SimpleNamespace(find=lambda: 42, client_geometry=lambda hwnd: (0, 0, 1440, 900),
+            user32=SimpleNamespace(GetForegroundWindow=lambda: 42))
+        def grab(region): captures.append(region); return hud('1:55') if shown[0] else scene
+        def read(image): ocr_calls.append(True); return 'CT队暂停还0：'
+        source = SimpleNamespace(grab=grab, close=lambda: None)
+        reader = SimpleNamespace(read=read, close=lambda: None)
+        monitor = RoundClockMonitor(source_factory=lambda: source, tracker_factory=lambda: tracker,
+            pause_reader_factory=lambda: reader)
+        monitor.pause_sampled.connect(lambda *args: detections.append(args))
+        monitor.set_context(('map', 1), False, time.monotonic())
+        monitor.set_pause_context(('map', 1), True, time.monotonic(), True)
+        monitor.start()
+        try:
+            base.pump(650)
+            self.assertFalse(ocr_calls)
+            self.assertFalse(any(r[1] for r in detections))
+            self.assertLessEqual(len(captures), 2)
+            shown[0] = True; base.pump(1250)
+            self.assertTrue(any(r[1] for r in detections))
+            self.assertTrue(ocr_calls)
+            shown[0] = False
+            end = time.monotonic()+2
+            while detections[-1][1] and time.monotonic() < end:
+                at = time.monotonic()
+                monitor.set_context(('map', 1), False, at)
+                monitor.set_pause_context(('map', 1), True, at, True)
+                base.pump(25)
+            self.assertFalse(detections[-1][1])
+            self.assertTrue(all(region == pause_banner_region((0, 0, 1440, 900)) for region in captures))
+        finally:
+            self.assertTrue(monitor.stop())
+
     def test_diagnostic_reports_are_rate_limited_and_can_report_fatal_failure(self):
         monitor = RoundClockMonitor()
         reports = []
