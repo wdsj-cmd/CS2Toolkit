@@ -18,6 +18,7 @@ class TimerView:
     red: bool = False
     pattern: object = None
     layout_changed: bool = False
+    clock_image: object = None
 
 
 def _components(mask):
@@ -90,10 +91,13 @@ class TimerAnalyzer:
         rgb = np.frombuffer(sample.constBits(), dtype=np.uint8).reshape(96, w, 4)[:, :, :3].astype(np.int16)
         red = (rgb[:, :, 0] >= 115) & (rgb[:, :, 0]-rgb[:, :, 1] >= 65) & (rgb[:, :, 0]-rgb[:, :, 2] >= 50)
         white = (rgb.min(axis=2) >= 150) & (rgb.max(axis=2)-rgb.min(axis=2) <= 85)
-        # Other players' portraits/names are outside the central timer field.
-        red[:, :round(w*.16)] = False; red[:, round(w*.84):] = False
-        red[84:] = False
-        chosen, is_red, kind = None, False, 'unknown'
+        # The timer is the first HUD row. The old 10%-high search could pick
+        # stationary red scores, names or equipment below a moving white clock.
+        for mask in (red, white):
+            mask[:, :round(w*.16)] = False
+            mask[:, round(w*.84):] = False
+            mask[35:] = False
+        candidates = []
         for mask, colored in ((red, True), (white, False)):
             if mask.mean() > .35:
                 continue
@@ -112,13 +116,12 @@ class TimerAnalyzer:
                 label = 'bars' if colored and self._bars(line) else 'clock' if self._clock(line) else 'unknown'
                 if label != 'unknown':
                     margin = max(1, round((bottom-top)*.20))
-                    chosen = (round(w*.12), max(0, top-margin), round(w*.88), min(96, bottom+margin))
-                    is_red, kind = colored, label
-                    break
-            if chosen is not None:
-                break
-        if chosen is None:
+                    box = (round(w*.12), max(0, top-margin), round(w*.88), min(96, bottom+margin))
+                    candidates.append((top, box, colored, label))
+        if not candidates:
             return TimerView(layout_changed=changed)
+        # Select by HUD position, never by red colour alone.
+        _, chosen, is_red, kind = min(candidates, key=lambda item: item[0])
         if self.box is None or abs(self.box[1]-chosen[1]) > 8 or abs(self.box[3]-chosen[3]) > 8:
             changed |= self.box is not None
             self.box = chosen
@@ -126,10 +129,16 @@ class TimerAnalyzer:
         mask = (red if is_red else white)[top:bottom, left:right]
         raw = (mask.astype(np.uint8)*255).copy()
         glyph = QImage(raw.data, raw.shape[1], raw.shape[0], raw.shape[1], QImage.Format_Grayscale8).copy()
+        # OCR needs a tight text line with a little breathing room. A wide
+        # nearly-empty image causes Windows OCR to drop tiny HUD characters.
+        ys, xs = np.nonzero(raw)
+        text_pixels = np.pad(raw[ys.min():ys.max()+1, xs.min():xs.max()+1], 3).copy()
+        clock_image = QImage(text_pixels.data, text_pixels.shape[1], text_pixels.shape[0],
+                             text_pixels.shape[1], QImage.Format_Grayscale8).copy()
         glyph = glyph.scaled(64, 24, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
         # QImage grayscale rows may be padded; width 64 is naturally aligned.
         pattern = np.frombuffer(glyph.constBits(), dtype=np.uint8).reshape(24, 64).copy().astype(np.float32)/255
-        return TimerView(kind, is_red, pattern, bool(changed))
+        return TimerView(kind, is_red, pattern, bool(changed), clock_image)
 
 
 def same_timer(a, b):
@@ -147,23 +156,35 @@ class PauseTimerDetector:
         self.reference = self.candidate = None
         self.still_since = self.candidate_at = None
         self.bars_since = None
+        self.red_since = None
+        self.verified_seconds = self.verified_at = None
 
     def suspend(self):
         # Hidden/obscured UI never ends an established pause.
         self.candidate = None; self.candidate_at = None; self.bars_since = None
+        self.verified_seconds = self.verified_at = None
         if not self.paused:
             self.reference = None; self.still_since = None
+            self.red_since = None
 
     def seed(self, paused):
         if paused != self.paused:
             self.paused = paused
             self.clear_observations()
 
-    def observe(self, view, now):
+    def needs_clock_verification(self, view, now):
+        return (not self.paused and view.kind == 'clock' and view.red
+                and not view.layout_changed
+                and self.red_since is not None and now-self.red_since >= 3
+                and same_timer(self.reference, view.pattern))
+
+    def observe(self, view, now, clock_seconds=None):
         if view.layout_changed:
             self.clear_observations()
         if view.kind == 'bars' and view.red:
             self.reference = None; self.still_since = None
+            self.red_since = None
+            self.verified_seconds = self.verified_at = None
             if self.bars_since is None:
                 self.bars_since = now
             if now-self.bars_since >= .25:
@@ -176,18 +197,35 @@ class PauseTimerDetector:
             return None
         if self.reference is None:
             self.reference = view.pattern; self.still_since = now
+            self.red_since = now if view.red else None
             return None
         if same_timer(self.reference, view.pattern):
             self.candidate = None; self.candidate_at = None
-            if view.red and now-self.still_since >= 3:
-                self.paused = True
-                return True
+            if not view.red:
+                self.red_since = None
+                self.verified_seconds = self.verified_at = None
+            elif self.red_since is None:
+                self.red_since = now
+            if self.paused:
+                return None
+            if self.red_since is not None and now-self.red_since >= 3:
+                # A stationary red shape is only a candidate. Require two
+                # actual M:SS reads to exclude a score/name/weapon HUD fragment.
+                valid = isinstance(clock_seconds, int) and not isinstance(clock_seconds, bool) and 0 <= clock_seconds < 3600
+                if valid:
+                    if (clock_seconds == self.verified_seconds and self.verified_at is not None
+                            and .4 <= now-self.verified_at <= 2):
+                        self.paused = True
+                        return True
+                    self.verified_seconds, self.verified_at = clock_seconds, now
             return None
+        self.verified_seconds = self.verified_at = None
         if self.candidate is None or not same_timer(self.candidate, view.pattern):
             self.candidate, self.candidate_at = view.pattern, now
             return None
         if now-self.candidate_at >= .35:
             self.reference = view.pattern; self.still_since = now
+            self.red_since = now if view.red else None
             self.candidate = None; self.candidate_at = None
             if self.paused:
                 self.paused = False

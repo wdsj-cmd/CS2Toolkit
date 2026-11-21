@@ -162,6 +162,30 @@ class PauseBannerReaderTests(unittest.TestCase):
                 self.assertFalse(is_pause_banner(self.make_reader().read(QImage())))
                 self.assertEqual(read.call_count, 1)
 
+    def test_numeric_clock_retry_enlarges_tiny_text_and_restores_normal_reader(self):
+        with patch.object(WindowsClockReader, '__init__', return_value=None):
+            reader = WindowsClockReader()
+        reader.scale = 4
+        scales = []
+        def recognize(image):
+            scales.append(reader.scale)
+            return '' if len(scales) == 1 else '1:26'
+        with patch.object(reader, 'read', side_effect=recognize):
+            self.assertEqual(reader.read_pause_clock(QImage()), '1:26')
+        self.assertEqual(scales, [4, 6])
+        self.assertEqual(reader.scale, 4)
+
+    def test_valid_numeric_clock_needs_no_retry_and_failed_retry_restores_scale(self):
+        with patch.object(WindowsClockReader, '__init__', return_value=None):
+            reader = WindowsClockReader()
+        reader.scale = 4
+        with patch.object(reader, 'read', return_value='1:26') as read:
+            self.assertEqual(reader.read_pause_clock(QImage()), '1:26')
+            self.assertEqual(read.call_count, 1)
+        with patch.object(reader, 'read', side_effect=['', OSError('unavailable')]):
+            with self.assertRaises(OSError): reader.read_pause_clock(QImage())
+        self.assertEqual(reader.scale, 4)
+
 
 class HudPauseMusicTests(unittest.TestCase):
     setUp = base.TimeoutMusicTests.setUp
@@ -209,7 +233,7 @@ class HudPauseMusicTests(unittest.TestCase):
 
     def test_hidden_banner_and_buy_menu_do_not_restart_pause_music(self):
         self.prepare()
-        shown, calls, moving = [True], [], [False]
+        shown, calls, moving, numeric_calls = [True], [], [False], []
         picture = banner(); scene = QImage(450, 54, QImage.Format_RGB32); scene.fill(QColor('#807060'))
         tracker = SimpleNamespace(find=lambda: 42, client_geometry=lambda hwnd: (0, 0, 1440, 900),
             user32=SimpleNamespace(GetForegroundWindow=lambda: 42))
@@ -220,8 +244,10 @@ class HudPauseMusicTests(unittest.TestCase):
             calls.append(True)
             return 'T队暂停还剩0:44' if len(calls) == 1 else 'T 队 停 0：'
         reader = SimpleNamespace(read=read, close=lambda: None)
+        def read_clock(image): numeric_calls.append(True); return '1:26'
+        clock_reader = SimpleNamespace(read=read_clock, close=lambda: None)
         monitor = RoundClockMonitor(source_factory=lambda: source, tracker_factory=lambda: tracker,
-            pause_reader_factory=lambda: reader)
+            pause_reader_factory=lambda: reader, reader_factory=lambda: clock_reader)
         monitor.pause_sampled.connect(self.controller._on_pause_visual)
         key = ('de_dust2', 1)
         def pump(seconds):
@@ -236,8 +262,9 @@ class HudPauseMusicTests(unittest.TestCase):
             now = time.monotonic(); monitor.set_context(key, False, now)
             monitor.set_pause_context(key, True, now, False, False); monitor.start()
             try:
-                pump(3.7)
+                pump(4.8)
                 self.assertFalse(calls)
+                self.assertEqual(len(numeric_calls), 2)
                 self.assertEqual(self.names().count('timeout'), 1)
                 self.assertFalse(self.player.fade_requests)
                 self.assertTrue(self.controller.engine.round_paused)
@@ -289,6 +316,26 @@ class HudPauseMusicTests(unittest.TestCase):
         self.assertFalse(self.controller._pause_active)
         self.assertGreater(self.player.stops, stops)
         self.assertEqual(self.names().count('timeout'), 1)
+
+    def test_round_end_releases_visual_pause_without_waiting_for_a_new_clock(self):
+        self.prepare(); self.visual(True); self.packet(phase='over')
+        self.assertFalse(self.controller._pause_active)
+        self.assertEqual(self.player.fade_requests, [1200])
+
+    def test_new_round_cannot_keep_previous_visual_pause(self):
+        self.prepare(); self.visual(True)
+        self.controller.process_gsi({'map': {'name': 'de_dust2', 'phase': 'live', 'round': 2},
+                                     'round': {'phase': 'freezetime'}})
+        self.assertFalse(self.controller._pause_active)
+        self.assertEqual(self.player.fade_requests, [1200])
+
+    def test_round_end_in_background_keeps_music_until_foreground_return(self):
+        self.prepare(); self.visual(True)
+        self.controller.clock_monitor.game_visibility_changed.emit(True, False)
+        self.packet(phase='over')
+        self.assertFalse(self.player.fade_requests)
+        self.controller.clock_monitor.game_visibility_changed.emit(True, True)
+        self.assertEqual(self.player.fade_requests, [1200])
 
     def test_estimated_bomb_timer_does_not_expire_while_live_pause_is_active(self):
         now = [100.0]
@@ -382,6 +429,34 @@ class HudPauseMusicTests(unittest.TestCase):
 
 
 class PauseWorkerTests(unittest.TestCase):
+    def test_stationary_red_region_requires_two_valid_equal_numeric_reads(self):
+        for text, expected in (('10 10', False), ('1:26', True)):
+            with self.subTest(text=text):
+                reads, detected = [], []
+                tracker = SimpleNamespace(find=lambda: 42, client_geometry=lambda hwnd: (0, 0, 1440, 900),
+                    user32=SimpleNamespace(GetForegroundWindow=lambda: 42))
+                source = SimpleNamespace(grab=lambda region: timer_frame(), close=lambda: None)
+                def read(image): reads.append(time.monotonic()); return text
+                reader = SimpleNamespace(read=read, close=lambda: None)
+                monitor = RoundClockMonitor(source_factory=lambda: source, tracker_factory=lambda: tracker,
+                                            reader_factory=lambda: reader)
+                monitor.pause_sampled.connect(lambda *args: detected.append(args))
+                def refresh():
+                    now = time.monotonic()
+                    monitor.set_context(('map', 1), False, now)
+                    monitor.set_pause_context(('map', 1), True, now)
+                refresh(); monitor.start()
+                try:
+                    end = time.monotonic()+4.8
+                    while time.monotonic() < end:
+                        refresh(); base.pump(20)
+                    self.assertGreaterEqual(len(reads), 2)
+                    self.assertLessEqual(len(reads), 3)
+                    self.assertEqual(any(row[1] for row in detected), expected)
+                    self.assertTrue(all(b-a >= .95 for a, b in zip(reads, reads[1:])))
+                finally:
+                    self.assertTrue(monitor.stop())
+
     def test_background_stops_capture_and_return_waits_for_timer_motion(self):
         foreground, text, captures, detected, visibility = [42], [None], [], [], []
         tracker = SimpleNamespace(find=lambda: 42, client_geometry=lambda hwnd: (0, 0, 720, 480),

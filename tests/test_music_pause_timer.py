@@ -80,12 +80,14 @@ class PauseTimerTests(unittest.TestCase):
         analyzer, detector = TimerAnalyzer(), PauseTimerDetector()
         still = analyzer.analyze(timer_frame())
         for now in (0, .5, 1, 2, 2.5): self.assertIsNone(detector.observe(still, now))
-        self.assertIs(detector.observe(still, 3), True)
+        self.assertTrue(detector.needs_clock_verification(still, 3))
+        self.assertIsNone(detector.observe(still, 3, 86))
+        self.assertIs(detector.observe(still, 3.5, 86), True)
         self.assertIsNone(detector.observe(TimerView(), 4))
         self.assertTrue(detector.paused)
         # Buying, brief flash/occlusion, and disappearance of the lower banner
         # do not end the pause. A second, stable clock reading does.
-        self.assertIs(detector.observe(still, 5), True)
+        self.assertIsNone(detector.observe(still, 5))
         moved = analyzer.analyze(timer_frame('1:25', red=False))
         self.assertIsNone(detector.observe(moved, 5.5))
         self.assertIs(detector.observe(moved, 6), False)
@@ -119,10 +121,56 @@ class PauseTimerTests(unittest.TestCase):
         detector.observe(view, 0); detector.suspend()
         self.assertIsNone(detector.observe(view, 20))
         self.assertFalse(detector.paused)
-        self.assertIs(detector.observe(view, 23), True)
+        self.assertIsNone(detector.observe(view, 23, 86))
+        self.assertIs(detector.observe(view, 23.5, 86), True)
         detector.suspend()
-        self.assertIs(detector.observe(view, 50), True)
+        self.assertIsNone(detector.observe(view, 50))
         self.assertTrue(detector.paused)
+
+    def test_static_red_shapes_without_two_numeric_reads_never_start_music(self):
+        analyzer, detector = TimerAnalyzer(), PauseTimerDetector()
+        view = analyzer.analyze(timer_frame('10 10'))
+        for at in range(30):
+            self.assertIsNone(detector.observe(view, at))
+        self.assertFalse(detector.paused)
+
+    def test_changing_numeric_reads_cannot_confirm_static_picture(self):
+        analyzer, detector = TimerAnalyzer(), PauseTimerDetector()
+        view = analyzer.analyze(timer_frame())
+        detector.observe(view, 0)
+        for at, seconds in ((3, 86), (4, 85), (5, 84), (8, 84)):
+            self.assertIsNone(detector.observe(view, at, seconds))
+        self.assertFalse(detector.paused)
+
+    def test_white_timer_is_not_replaced_by_a_stationary_red_score(self):
+        for resolution in self.RESOLUTIONS:
+            image = timer_frame('1:55', resolution, red=False)
+            painter = QPainter(image)
+            font = QFont('Arial'); font.setBold(True); font.setPixelSize(max(6, round(resolution[1]*.02)))
+            painter.setFont(font); painter.setPen(QColor('#ff2020'))
+            painter.drawText(0, round(image.height()*.5), image.width(), round(image.height()*.4),
+                             Qt.AlignHCenter | Qt.AlignTop, '10 : 10')
+            painter.end()
+            view = TimerAnalyzer().analyze(image)
+            self.assertEqual(view.kind, 'clock', resolution)
+            self.assertFalse(view.red, resolution)
+
+    def test_red_score_below_the_timer_cannot_become_a_clock(self):
+        image = timer_frame()
+        painter = QPainter(image); painter.fillRect(image.rect(), QColor('#151515'))
+        font = QFont('Arial'); font.setPixelSize(20); font.setBold(True)
+        painter.setFont(font); painter.setPen(QColor('#ff2020'))
+        painter.drawText(0, 45, image.width(), 40, Qt.AlignCenter, '10 : 10')
+        painter.end()
+        self.assertEqual(TimerAnalyzer().analyze(image).kind, 'unknown')
+
+    def test_white_to_red_colour_change_does_not_reuse_old_still_duration(self):
+        analyzer, detector = TimerAnalyzer(), PauseTimerDetector()
+        white, red = analyzer.analyze(timer_frame(red=False)), analyzer.analyze(timer_frame())
+        detector.observe(white, 0); detector.observe(white, 20)
+        detector.observe(red, 21)
+        self.assertFalse(detector.needs_clock_verification(red, 21.5))
+        self.assertTrue(detector.needs_clock_verification(red, 24))
 
     def test_resolution_switch_preserves_pause_and_reanchors_motion(self):
         analyzer, detector = TimerAnalyzer(), PauseTimerDetector()

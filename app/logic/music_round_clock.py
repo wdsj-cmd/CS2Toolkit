@@ -270,6 +270,18 @@ class WindowsClockReader:
     def read(self, image, transformation=Qt.SmoothTransformation):
         return self.loop.run_until_complete(self._recognize(image, transformation))
 
+    def read_pause_clock(self, image):
+        text = self.read(image)
+        if parse_clock(text) is None:
+            # Only a stationary-clock candidate needs the larger retry. Keep
+            # the usual round-clock reader and its sampling budget unchanged.
+            scale, self.scale = self.scale, 6
+            try:
+                text = self.read(image)
+            finally:
+                self.scale = scale
+        return text
+
     def close(self):
         self.engine = None
         self.loop.close()
@@ -382,6 +394,8 @@ class RoundClockMonitor(QObject):
             reader_unavailable = False
             pause_reader_unavailable = False
             next_banner = 0
+            next_clock_verify = 0
+            clock_ocr_valid = None
             banner_text_seen = banner_pause_word = banner_clock = False
             pause_ocr_error = None
             while not self._stop.is_set():
@@ -401,6 +415,8 @@ class RoundClockMonitor(QObject):
                         reported_timer_pause = None
                         last_pause_feedback = None
                         next_banner = 0
+                        next_clock_verify = 0
+                        clock_ocr_valid = None
                         banner_text_seen = banner_pause_word = banner_clock = False
                         self._next_pause_status = 0
                         key = current
@@ -468,8 +484,24 @@ class RoundClockMonitor(QObject):
                             if pause_active:
                                 timer_frame = source.grab(pause_timer_region(geometry))
                                 view = timer_analyzer.analyze(timer_frame)
-                                decision = timer_detector.observe(view, observed_at)
-                                evidence = 'timer_bars' if view.kind == 'bars' else 'timer_frozen_red' if decision is True else 'timer_moving'
+                                clock_seconds = None
+                                if (timer_detector.needs_clock_verification(view, observed_at)
+                                        and now >= next_clock_verify and not reader_unavailable):
+                                    next_clock_verify = now+1
+                                    try:
+                                        if reader is None:
+                                            reader = self.reader_factory()
+                                        verify = getattr(reader, 'read_pause_clock', reader.read)
+                                        clock_seconds = parse_clock(verify(view.clock_image))
+                                        clock_ocr_valid = clock_seconds is not None
+                                        if not clock_ocr_valid:
+                                            timer_detector.verified_seconds = timer_detector.verified_at = None
+                                    except Exception as error:
+                                        reader_unavailable = True
+                                        clock_ocr_valid = False
+                                        pause_ocr_error = type(error).__name__
+                                decision = timer_detector.observe(view, observed_at, clock_seconds)
+                                evidence = 'timer_bars' if view.kind == 'bars' else 'timer_frozen_red_verified' if decision is True else 'timer_moving'
                                 # The banner is an optional positive hint only.
                                 # Its disappearance (e.g. behind the buy menu)
                                 # can never stop an established pause.
@@ -497,6 +529,7 @@ class RoundClockMonitor(QObject):
                                     self._pause_status('timer_sample', window_size=list(geometry[2:]),
                                         timer_kind=view.kind, red=view.red, paused=timer_detector.paused,
                                         layout_changed=view.layout_changed,
+                                        clock_ocr_valid=clock_ocr_valid,
                                         banner_text_seen=banner_text_seen, banner_pause_word=banner_pause_word,
                                         banner_clock=banner_clock, ocr_error=pause_ocr_error)
                                 if decision is not None and tracker.user32.GetForegroundWindow() == hwnd:
