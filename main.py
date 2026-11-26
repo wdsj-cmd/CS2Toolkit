@@ -43,22 +43,19 @@ if __name__ == "__main__":
     server.removeServer(SERVER_NAME)
     server.listen(SERVER_NAME)
     
-    from app.main_window import CS2Tool
-    window = CS2Tool()
+    from app.startup import StartupController
+    startup = StartupController()
+    app.aboutToQuit.connect(startup.stop)
     
     def on_new_connection():
         client = server.nextPendingConnection()
         client.waitForReadyRead(500)
         msg = client.readAll().data()
         if msg == b"WAKE_UP":
-            if window.isHidden() or window.isMinimized():
-                window.show_window()
-            else:
-                window.activateWindow()
-                window.raise_()
+            startup.focus()
         client.disconnectFromServer()
         
     server.newConnection.connect(on_new_connection)
     
-    window.show()
+    startup.start()
     sys.exit(app.exec())

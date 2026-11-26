@@ -42,7 +42,7 @@ class UpdateSignalEmitter(QObject):
 class CS2Tool(FluentWindow):
     def __init__(self):
         super().__init__()
-        self.version = "1.5.3.bate.3"
+        self.version = "1.5.3.bate.4"
         self._last_received_flash = None
         self.repo_url = "https://github.com/clover-233/CS2Toolkit"
         self.is_dark_mode = False
@@ -190,7 +190,7 @@ class CS2Tool(FluentWindow):
                 self.setting_tab.gsi_port_input.setEnabled(False)
 
     def init_window(self):
-        self.setWindowTitle("CS2 工具箱 · 1.5.3.bate.3")
+        self.setWindowTitle("CS2 工具箱 · 1.5.3.bate.4")
         self.setWindowIcon(QIcon(":/app_icon.ico"))
         self.resize(750, 780)
         self.center()
@@ -213,11 +213,31 @@ class CS2Tool(FluentWindow):
         self.tray_icon.show()
 
     def show_window(self):
+        preview = getattr(self, '_offline_preview', None)
+        if preview is not None and preview.game is not None and preview.game.isVisible():
+            preview.focus()
+            return
         self.show()
         self.activateWindow()
 
+    def show_offline_preview(self):
+        from app.startup import StartupController
+        previous = getattr(self, '_offline_preview', None)
+        if previous is not None:
+            if previous.game is not None and previous.game.isVisible():
+                previous.focus()
+                return
+            previous.stop()
+            if previous.game is not None:
+                previous.game.deleteLater()
+            previous.deleteLater()
+        self._offline_preview = StartupController(lambda: self, parent=self)
+        self._offline_preview.start(preview=True)
+
     def quit_app(self):
         self._force_quit = True
+        if getattr(self, '_offline_preview', None) is not None:
+            self._offline_preview.stop()
         self.music_box.cleanup()
         self.visual_handler.cleanup()
         QApplication.quit()
