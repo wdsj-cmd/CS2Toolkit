@@ -2,9 +2,10 @@ import os
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 import time
 import unittest
+from unittest.mock import patch
 
 from PySide6.QtCore import QCoreApplication, QEvent, Qt
-from PySide6.QtNetwork import QHostAddress, QTcpServer
+from PySide6.QtNetwork import QHostAddress, QNetworkRequest, QTcpServer
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 
@@ -48,6 +49,9 @@ class HttpFixture:
             return
         client.readAll()
         self.requests += 1
+        if self.status == 'disconnected':
+            client.disconnectFromHost()
+            return
         if self.status is not None:
             client.write(f'HTTP/1.1 {self.status} Test\r\nContent-Length: 0\r\nConnection: close\r\n\r\n'.encode())
             client.disconnectFromHost()
@@ -60,6 +64,9 @@ class HttpFixture:
 
 class StartupTests(unittest.TestCase):
     def setUp(self):
+        logger = patch('app.startup.record')
+        logger.start()
+        self.addCleanup(logger.stop)
         self.http = HttpFixture()
         self.addCleanup(self.http.close)
         self.windows = []
@@ -94,8 +101,24 @@ class StartupTests(unittest.TestCase):
         QTest.qWait(180)
         self.assertEqual(self.http.requests, count)
 
+    def test_reachable_server_rejecting_head_does_not_mean_offline(self):
+        self.http.status = 403
+        controller = self.start()
+        self.assertTrue(wait_until(lambda: len(self.windows) == 1))
+        self.assertIsNone(controller.game)
+
+    def test_startup_deadline_also_covers_stalled_lower_level_timeouts(self):
+        self.http.status = None
+        # DNS/proxy setup may precede Qt's transfer timeout. Keep real HTTP requests
+        # pending while suppressing that lower-level timer to exercise our deadline.
+        with patch.object(QNetworkRequest, 'setTransferTimeout'):
+            controller = self.start(timeout=80)
+            self.assertTrue(wait_until(lambda: controller.game is not None, 500))
+        QTest.keyClick(controller.game, Qt.Key_Escape)
+        self.assertTrue(wait_until(lambda: len(self.windows) == 1))
+
     def test_offline_escape_enters_main_and_stops_all_game_work(self):
-        self.http.status = 503
+        self.http.status = 'disconnected'
         controller = self.start()
         self.assertTrue(wait_until(lambda: controller.game is not None))
         game = controller.game
@@ -108,7 +131,7 @@ class StartupTests(unittest.TestCase):
         self.assertFalse(self.probe.is_running)
 
     def test_reconnection_plays_meteor_before_opening_main_exactly_once(self):
-        self.http.status = 503
+        self.http.status = 'disconnected'
         controller = self.start()
         self.assertTrue(wait_until(lambda: controller.game is not None))
         self.http.status = 200
@@ -122,7 +145,7 @@ class StartupTests(unittest.TestCase):
         self.assertFalse(self.probe.is_running)
 
     def test_escape_also_skips_reconnection_animation(self):
-        self.http.status = 503
+        self.http.status = 'disconnected'
         controller = self.start()
         self.assertTrue(wait_until(lambda: controller.game is not None))
         self.http.status = 200
@@ -138,14 +161,14 @@ class StartupTests(unittest.TestCase):
         self.assertTrue(wait_until(lambda: len(self.windows) == 1, 200))
 
     def test_one_reachable_endpoint_is_enough(self):
-        broken = HttpFixture(503)
+        broken = HttpFixture('disconnected')
         self.addCleanup(broken.close)
         controller = self.start([broken.url, self.http.url])
         self.assertTrue(wait_until(lambda: len(self.windows) == 1))
         self.assertIsNone(controller.game)
 
     def test_closing_game_cancels_startup_without_opening_main(self):
-        self.http.status = 503
+        self.http.status = 'disconnected'
         controller = self.start()
         self.assertTrue(wait_until(lambda: controller.game is not None))
         controller.game.close()

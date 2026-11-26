@@ -1,6 +1,7 @@
 """A short, asynchronous connectivity check before the normal toolkit startup."""
 from PySide6.QtCore import QObject, QTimer, QUrl, Signal
-from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
+from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest
+from app.logic.flash_diagnostics import record
 
 
 class ConnectivityProbe(QObject):
@@ -16,6 +17,10 @@ class ConnectivityProbe(QObject):
         self.retry_timer.setInterval(interval_ms)
         self.retry_timer.setSingleShot(True)
         self.retry_timer.timeout.connect(self._check)
+        self.deadline_timer = QTimer(self)
+        self.deadline_timer.setSingleShot(True)
+        self.deadline_timer.setInterval(timeout_ms)
+        self.deadline_timer.timeout.connect(self._timeout)
         self._replies = set()
         self._generation = 0
         self._last_status = None
@@ -32,6 +37,10 @@ class ConnectivityProbe(QObject):
         self.is_running = False
         self._generation += 1
         self.retry_timer.stop()
+        self.deadline_timer.stop()
+        self._cancel_pending()
+
+    def _cancel_pending(self):
         replies, self._replies = self._replies, set()
         for reply in replies:
             reply.abort()
@@ -42,6 +51,7 @@ class ConnectivityProbe(QObject):
             return
         self._generation += 1
         generation = self._generation
+        self.deadline_timer.start()
         for url in self.urls:
             request = QNetworkRequest(QUrl(url))
             request.setTransferTimeout(self.timeout_ms)
@@ -56,19 +66,26 @@ class ConnectivityProbe(QObject):
             return
         self._replies.discard(reply)
         status = reply.attribute(QNetworkRequest.HttpStatusCodeAttribute)
-        online = (reply.error() == QNetworkReply.NoError
-                  and status is not None and 200 <= int(status) < 400)
+        # A reachable server can reject HEAD (403/405) while the computer is online.
+        # HTTP errors are connectivity; transport/TLS errors have no HTTP response.
+        online = status is not None and 200 <= int(status) < 600
         reply.deleteLater()
         if online:
             # Invalidate callbacks before aborting other requests: abort may emit synchronously.
             self._generation += 1
-            pending, self._replies = self._replies, set()
-            for other in pending:
-                other.abort()
-                other.deleteLater()
+            self.deadline_timer.stop()
+            self._cancel_pending()
             self._publish(True)
         elif not self._replies:
+            self.deadline_timer.stop()
             self._publish(False)
+
+    def _timeout(self):
+        if not self.is_running:
+            return
+        self._generation += 1
+        self._cancel_pending()
+        self._publish(False)
 
     def _publish(self, online):
         if online != self._last_status:
@@ -98,6 +115,7 @@ class StartupController(QObject):
 
     def start(self, preview=False):
         self._preview = preview
+        record('startup_network_check', preview=preview)
         if preview:
             self._show_game()
         else:
@@ -114,6 +132,7 @@ class StartupController(QObject):
             return
         from app.ui.offline_dino import OfflineDinoWindow
         self.game = OfflineDinoWindow(preview=self._preview)
+        record('offline_game_opened', preview=self._preview)
         self.game.proceed.connect(self._open_main)
         self.game.dismissed.connect(self._dismissed)
         if self._preview:
@@ -127,6 +146,7 @@ class StartupController(QObject):
     def _network_changed(self, online):
         if self._stopped or self._opening:
             return
+        record('startup_network_status', online=online)
         if online:
             if self.game is None:
                 self._open_main()
@@ -140,6 +160,7 @@ class StartupController(QObject):
         if self._opening or self._stopped:
             return
         self._opening = True
+        record('startup_main_opening', preview=self._preview)
         self.probe.stop()
         if self.main_window is None:
             self.main_window = self.main_window_factory()
