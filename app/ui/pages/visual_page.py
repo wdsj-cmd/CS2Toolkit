@@ -1,7 +1,8 @@
 import os
 from ...logic.flash_background import flash_image_extensions
+from ..kill_icon_label import KillIconLabel
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFileDialog, QColorDialog
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QSize, QPropertyAnimation
 from qfluentwidgets import (ScrollArea, SettingCardGroup, SwitchSettingCard, SettingCard,
                            PushSettingCard, PushButton, FluentIcon as FIF, LineEdit, MessageBoxBase, SubtitleLabel, BodyLabel, SwitchButton, Slider, InfoBar)
 
@@ -324,6 +325,10 @@ class KillIconDialog(MessageBoxBase):
         super().__init__(parent)
         self.config_manager = config_manager
         self.visual_config = self.config_manager.get('visual', {})
+        icons = self.visual_config.get('kill_icons_1_5', [])
+        icons = icons if isinstance(icons, list) else []
+        self.visual_config['kill_icons_1_5'] = [dict(icons[i]) if i < len(icons) and isinstance(icons[i], dict)
+                                               else {} for i in range(5)]
         self._setup_ui()
 
     def _setup_ui(self):
@@ -344,9 +349,12 @@ class KillIconDialog(MessageBoxBase):
         self.path_label.setStyleSheet("color: #666666;")
         selection_layout.addWidget(self.path_label, 1)
 
-        self.select_btn = PushButton("选择图片", self)
+        self.select_btn = PushButton("选择素材", self)
         self.select_btn.clicked.connect(self._browse_basic_image)
         selection_layout.addWidget(self.select_btn)
+        self.preview_btn = PushButton("预览", self)
+        self.preview_btn.clicked.connect(lambda: self._preview_icon())
+        selection_layout.addWidget(self.preview_btn)
         basic_layout.addLayout(selection_layout)
 
         # 高级设置开关
@@ -422,12 +430,29 @@ class KillIconDialog(MessageBoxBase):
             self.adv_labels.append(label)
             h_layout.addWidget(label, 1)
 
-            btn = PushButton("选择图片", self)
+            btn = PushButton("选择素材", self)
             btn.clicked.connect(lambda checked=False, idx=i: self._browse_adv_image(idx))
             h_layout.addWidget(btn)
+            preview_btn = PushButton("预览", self)
+            preview_btn.clicked.connect(lambda checked=False, idx=i: self._preview_icon(idx))
+            h_layout.addWidget(preview_btn)
             adv_layout.addLayout(h_layout)
 
         self.viewLayout.addWidget(self.adv_container)
+
+        self.viewLayout.addWidget(BodyLabel("支持透明 GIF；每次击杀从头播放，3 秒后淡出。", self))
+        self.preview_label = KillIconLabel(self)
+        self.preview_label.hide()
+        self.viewLayout.addWidget(self.preview_label, 0, Qt.AlignHCenter)
+        self.preview_fade = QPropertyAnimation(self.preview_label, b'mediaOpacity', self)
+        self.preview_fade.setDuration(500)
+        self.preview_fade.setStartValue(1.0)
+        self.preview_fade.setEndValue(0.0)
+        self.preview_fade.finished.connect(self._clear_preview)
+        self.preview_timer = QTimer(self)
+        self.preview_timer.setSingleShot(True)
+        self.preview_timer.timeout.connect(self.preview_fade.start)
+        self.preview_label.failed.connect(self._clear_preview)
 
         self._update_visibility()
         self.widget.setMinimumWidth(450)
@@ -435,7 +460,6 @@ class KillIconDialog(MessageBoxBase):
     def _update_visibility(self):
         if self.is_advanced:
             self.adv_container.show()
-            self.basic_container.findChild(QHBoxLayout).setEnabled(False) # 只是视觉上，实际用 hide 更简单但影响布局
         else:
             self.adv_container.hide()
 
@@ -449,11 +473,13 @@ class KillIconDialog(MessageBoxBase):
         self.width_value_label.setText(f"{value} px")
         self.visual_config['kill_icon_width'] = value
         self.config_manager.set('visual', self.visual_config)
+        self._resize_preview()
 
     def _on_height_changed(self, value):
         self.height_value_label.setText(f"{value} px")
         self.visual_config['kill_icon_height'] = value
         self.config_manager.set('visual', self.visual_config)
+        self._resize_preview()
 
     def _on_bottom_changed(self, value):
         self.bottom_value_label.setText(f"{value} px")
@@ -475,6 +501,34 @@ class KillIconDialog(MessageBoxBase):
             self.visual_config['kill_icons_1_5'] = icons
             self.adv_labels[index].setText(os.path.basename(path))
             self.config_manager.set('visual', self.visual_config)
+
+    def _resize_preview(self):
+        if hasattr(self, 'preview_label'):
+            size = QSize(self.width_slider.value(), self.height_slider.value())
+            self.preview_label.setFixedSize(size.scaled(QSize(240, 160), Qt.KeepAspectRatio))
+
+    def _preview_icon(self, index=None):
+        self._clear_preview()
+        path = (self.visual_config.get('kill_icon_path', '') if index is None
+                else self.visual_config['kill_icons_1_5'][index].get('path', ''))
+        self._resize_preview()
+        if not self.preview_label.set_media(path):
+            InfoBar.warning("无法预览", "请选择可读取的静态图片或 GIF；视频请在游戏内查看。", parent=self)
+            return
+        self.preview_label.mediaOpacity = 1.0
+        self.preview_label.show()
+        self.preview_timer.start(3000)
+
+    def _clear_preview(self):
+        self.preview_timer.stop()
+        self.preview_fade.stop()
+        self.preview_label.hide()
+        self.preview_label.clear_media()
+
+    def hideEvent(self, event):
+        if hasattr(self, 'preview_timer'):
+            self._clear_preview()
+        super().hideEvent(event)
 
 class VisualPage(ScrollArea):
     def __init__(self, config_manager, parent=None):

@@ -7,7 +7,7 @@ import subprocess
 import time
 from PySide6.QtWidgets import QWidget, QLabel
 from PySide6.QtCore import Qt, QUrl, QTimer, Signal, QObject, QPropertyAnimation, QSize, QCoreApplication
-from PySide6.QtGui import QPixmap, QColor, QMovie, QImage
+from PySide6.QtGui import QPixmap, QColor, QImage
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from .audio_session_controller import AudioSessionController
@@ -18,6 +18,7 @@ from .target_media_controller import (TargetMediaController, foreground_media_ta
 from .death_switch_guard import DeathSwitchGuard
 from .flash_background import (PreFlashCache, compose_flash_image,
                                image_has_transparency, flash_image_extensions)
+from ..ui.kill_icon_label import KillIconLabel
 
 
 class FlashSurface(QLabel):
@@ -83,10 +84,9 @@ class OverlayWindow(QWidget):
         self.death_label.setStyleSheet("background: transparent;")
 
         # 击杀图标控件（静态/GIF）
-        self.kill_icon_label = QLabel(self)
-        self.kill_icon_label.setScaledContents(True)
+        self.kill_icon_label = KillIconLabel(self)
         self.kill_icon_label.hide()
-        self.kill_icon_movie = None
+        self.kill_icon_label.failed.connect(self.hide_kill_icon)
         self.kill_icon_width = 120
         self.kill_icon_height = 120
         self.kill_icon_bottom = 100
@@ -125,6 +125,7 @@ class OverlayWindow(QWidget):
 
         # 击杀图标定时隐藏
         self.kill_icon_timer = QTimer(self)
+        self.kill_icon_timer.setSingleShot(True)
         self.kill_icon_timer.timeout.connect(self.hide_kill_icon)
 
         from PySide6.QtWidgets import QGraphicsOpacityEffect
@@ -215,6 +216,10 @@ class OverlayWindow(QWidget):
             self.flash_label.setWindowOpacity(opacity)
 
     def closeEvent(self, event):
+        self.kill_icon_timer.stop()
+        self.kill_icon_label.clear_media()
+        self.kill_media_player.stop()
+        self.kill_media_player.setSource(QUrl())
         self.background_cache.close()
         self.flash_label.close()
         super().closeEvent(event)
@@ -510,42 +515,30 @@ class OverlayWindow(QWidget):
         # 停止可能正在运行的淡出动画和定时器
         self.kill_icon_fade_out.stop()
         self.kill_video_fade_out.stop()
+        self.kill_icon_fade_in.stop()
+        self.kill_video_fade_in.stop()
         self.kill_icon_timer.stop()
 
         # 窗口透明度和显示已由焦点定时器 _check_game_focus 自动管理
 
         is_video = path.lower().endswith(('.mp4', '.webm', '.avi'))
-        is_gif = path.lower().endswith('.gif')
 
         if is_video:
             self.kill_icon_label.hide()
-            if self.kill_icon_movie:
-                self.kill_icon_movie.stop()
+            self.kill_icon_label.clear_media()
 
             self.kill_media_player.setSource(QUrl.fromLocalFile(path))
             self.kill_video_widget.show()
             self.kill_media_player.play()
             self.kill_video_fade_in.start()
-        elif is_gif:
-            self.kill_video_widget.hide()
-            self.kill_media_player.stop()
-
-            if self.kill_icon_movie:
-                self.kill_icon_movie.stop()
-
-            self.kill_icon_movie = QMovie(path)
-            self.kill_icon_label.setMovie(self.kill_icon_movie)
-            self.kill_icon_movie.start()
-            self.kill_icon_label.show()
-            self.kill_icon_fade_in.start()
         else:
             self.kill_video_widget.hide()
             self.kill_media_player.stop()
-
-            if self.kill_icon_movie:
-                self.kill_icon_movie.stop()
-
-            self.kill_icon_label.setPixmap(QPixmap(path))
+            self.kill_media_player.setSource(QUrl())
+            if not self.kill_icon_label.set_media(path):
+                self.kill_icon_label.hide()
+                self._check_hide()
+                return
             self.kill_icon_label.show()
             self.kill_icon_fade_in.start()
 
@@ -555,6 +548,8 @@ class OverlayWindow(QWidget):
 
     def hide_kill_icon(self):
         self.kill_icon_timer.stop()
+        self.kill_icon_fade_in.stop()
+        self.kill_video_fade_in.stop()
         if not self.kill_icon_label.isHidden():
             self.kill_icon_fade_out.start()
         if not self.kill_video_widget.isHidden():
@@ -562,10 +557,7 @@ class OverlayWindow(QWidget):
 
     def _on_kill_icon_fade_out_finished(self):
         self.kill_icon_label.hide()
-        if self.kill_icon_movie:
-            self.kill_icon_movie.stop()
-            self.kill_icon_label.setMovie(None) # 释放GIF内存
-        self.kill_icon_label.setPixmap(QPixmap()) # 释放静态图内存
+        self.kill_icon_label.clear_media()
         self._check_hide()
 
     def _on_kill_video_fade_out_finished(self):
