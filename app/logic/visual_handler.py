@@ -16,6 +16,7 @@ from .flash_diagnostics import record
 from .target_media_controller import (TargetMediaController, foreground_media_target,
                                       default_media_target, activate_media_window)
 from .death_switch_guard import DeathSwitchGuard
+from .kill_icon_config import apply_gif_size_default
 from .flash_background import (PreFlashCache, compose_flash_image,
                                image_has_transparency, flash_image_extensions)
 from ..ui.kill_icon_label import KillIconLabel
@@ -638,6 +639,8 @@ class VisualHandler(QObject):
 
     def _update_config(self, force=False):
         config = self.config_manager.get('visual', {})
+        if apply_gif_size_default(config):
+            self.config_manager.set('visual', config)
         signature = json.dumps(config, ensure_ascii=False, sort_keys=True)
         if not force and signature == self._visual_config_signature:
             return

@@ -196,6 +196,81 @@ class KillIconGifTests(unittest.TestCase):
             handler.cleanup(); handler.deleteLater(); pump(30)
 
 
+class KillIconSizeDefaultsTests(unittest.TestCase):
+    setUp = KillIconGifTests.setUp
+    close_overlay = KillIconGifTests.close_overlay
+
+    def dialog(self, config):
+        parent = QWidget(); parent.resize(900, 900)
+        dialog = KillIconDialog(config, parent)
+        self.addCleanup(lambda: (dialog.close(), parent.close(), dialog.deleteLater(), parent.deleteLater(), pump(20)))
+        return dialog
+
+    def select(self, dialog, path, index=None):
+        with patch('app.ui.pages.visual_page.QFileDialog.getOpenFileName', return_value=(str(path), '')):
+            if index is None: dialog._browse_basic_image()
+            else: dialog._browse_adv_image(index)
+
+    def test_first_global_gif_selection_sets_320_in_saved_settings_and_controls(self):
+        config = Config({'kill_icon_width': 120, 'kill_icon_height': 120})
+        dialog = self.dialog(config); self.select(dialog, self.gif)
+        self.assertEqual((dialog.width_slider.value(), dialog.height_slider.value()), (320, 320))
+        self.assertEqual((config.get('visual')['kill_icon_width'], config.get('visual')['kill_icon_height']), (320, 320))
+
+    def test_first_advanced_slot_gif_selection_sets_320(self):
+        config = Config({'kill_icon_is_advanced': True, 'kill_icon_width': 120, 'kill_icon_height': 120})
+        dialog = self.dialog(config); self.select(dialog, self.gif, 4)
+        self.assertEqual((dialog.width_slider.value(), dialog.height_slider.value()), (320, 320))
+        self.assertEqual(config.get('visual')['kill_icons_1_5'][4]['path'], str(self.gif))
+
+    def test_enabling_existing_gif_slots_synchronizes_size_controls_before_runtime_tick(self):
+        config = Config({'kill_icon_is_advanced': False, 'kill_icon_path': str(self.png),
+                         'kill_icons_1_5': [{'path': str(self.gif)}],
+                         'kill_icon_width': 120, 'kill_icon_height': 120})
+        dialog = self.dialog(config)
+        self.assertEqual((dialog.width_slider.value(), dialog.height_slider.value()), (120, 120))
+        dialog.adv_switch.setChecked(True)
+        self.assertEqual((dialog.width_slider.value(), dialog.height_slider.value()), (320, 320))
+        self.assertEqual((config.get('visual')['kill_icon_width'], config.get('visual')['kill_icon_height']), (320, 320))
+
+    def test_existing_custom_dimensions_and_bottom_offset_survive_gif_selection(self):
+        config = Config({'kill_icon_width': 321, 'kill_icon_height': 316, 'kill_icon_bottom': 0})
+        dialog = self.dialog(config); self.select(dialog, self.gif)
+        visual = config.get('visual')
+        self.assertEqual((visual['kill_icon_width'], visual['kill_icon_height'], visual['kill_icon_bottom']), (321, 316, 0))
+        self.assertEqual((dialog.width_slider.value(), dialog.height_slider.value()), (321, 316))
+
+    def test_manual_choice_of_120_is_retained_for_future_gifs_and_reopen(self):
+        config = Config({'kill_icon_width': 120, 'kill_icon_height': 120})
+        dialog = self.dialog(config)
+        dialog.width_slider.setValue(150); dialog.width_slider.setValue(120)
+        self.select(dialog, self.gif)
+        self.assertEqual((dialog.width_slider.value(), dialog.height_slider.value()), (120, 120))
+        self.assertTrue(config.get('visual').get('kill_icon_size_customized'))
+        reopened = self.dialog(config)
+        self.assertEqual((reopened.width_slider.value(), reopened.height_slider.value()), (120, 120))
+
+    def test_runtime_migrates_untouched_gif_default_before_opening_settings(self):
+        config = Config({'flash_enabled': False, 'kill_icon_enabled': True, 'kill_icon_path': str(self.gif),
+                         'kill_icon_width': 120, 'kill_icon_height': 120})
+        handler = VisualHandler(config)
+        try:
+            self.assertEqual((handler.overlay.kill_icon_width, handler.overlay.kill_icon_height), (320, 320))
+            self.assertEqual((config.get('visual')['kill_icon_width'], config.get('visual')['kill_icon_height']), (320, 320))
+        finally:
+            handler.cleanup(); handler.deleteLater(); pump(20)
+
+    def test_static_active_icon_and_inactive_gif_slots_keep_original_dimensions(self):
+        config = Config({'flash_enabled': False, 'kill_icon_path': str(self.png), 'kill_icon_width': 120,
+                         'kill_icon_height': 120, 'kill_icon_is_advanced': False,
+                         'kill_icons_1_5': [{'path': str(self.gif)}]})
+        handler = VisualHandler(config)
+        try:
+            self.assertEqual((handler.overlay.kill_icon_width, handler.overlay.kill_icon_height), (120, 120))
+        finally:
+            handler.cleanup(); handler.deleteLater(); pump(20)
+
+
 class KillIconPreviewTests(unittest.TestCase):
     def test_preview_draws_inside_dialog_and_fades_in_place(self):
         with tempfile.TemporaryDirectory() as folder:

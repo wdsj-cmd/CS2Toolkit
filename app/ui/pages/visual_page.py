@@ -1,8 +1,9 @@
 import os
 from ...logic.flash_background import flash_image_extensions
+from ...logic.kill_icon_config import apply_gif_size_default
 from ..kill_icon_label import KillIconLabel
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFileDialog, QColorDialog
-from PySide6.QtCore import Qt, QTimer, QSize, QPropertyAnimation
+from PySide6.QtCore import Qt, QTimer, QSize, QPropertyAnimation, QSignalBlocker
 from qfluentwidgets import (ScrollArea, SettingCardGroup, SwitchSettingCard, SettingCard,
                            PushSettingCard, PushButton, FluentIcon as FIF, LineEdit, MessageBoxBase, SubtitleLabel, BodyLabel, SwitchButton, Slider, InfoBar)
 
@@ -329,6 +330,8 @@ class KillIconDialog(MessageBoxBase):
         icons = icons if isinstance(icons, list) else []
         self.visual_config['kill_icons_1_5'] = [dict(icons[i]) if i < len(icons) and isinstance(icons[i], dict)
                                                else {} for i in range(5)]
+        if apply_gif_size_default(self.visual_config):
+            self.config_manager.set('visual', self.visual_config)
         self._setup_ui()
 
     def _setup_ui(self):
@@ -466,18 +469,21 @@ class KillIconDialog(MessageBoxBase):
     def _on_advanced_toggled(self, checked):
         self.is_advanced = checked
         self.visual_config['kill_icon_is_advanced'] = checked
+        self._set_gif_default_size()
         self._update_visibility()
         self.config_manager.set('visual', self.visual_config)
 
     def _on_width_changed(self, value):
         self.width_value_label.setText(f"{value} px")
         self.visual_config['kill_icon_width'] = value
+        self.visual_config['kill_icon_size_customized'] = True
         self.config_manager.set('visual', self.visual_config)
         self._resize_preview()
 
     def _on_height_changed(self, value):
         self.height_value_label.setText(f"{value} px")
         self.visual_config['kill_icon_height'] = value
+        self.visual_config['kill_icon_size_customized'] = True
         self.config_manager.set('visual', self.visual_config)
         self._resize_preview()
 
@@ -490,6 +496,7 @@ class KillIconDialog(MessageBoxBase):
         path, _ = QFileDialog.getOpenFileName(self, "选择击杀图标", "", "媒体文件 (*.png *.jpg *.jpeg *.bmp *.gif *.mp4 *.webm)")
         if path:
             self.visual_config['kill_icon_path'] = path
+            self._set_gif_default_size(path)
             self.path_label.setText(os.path.basename(path))
             self.config_manager.set('visual', self.visual_config)
 
@@ -499,8 +506,18 @@ class KillIconDialog(MessageBoxBase):
             icons = self.visual_config.get('kill_icons_1_5', [{} for _ in range(5)])
             icons[index]['path'] = path
             self.visual_config['kill_icons_1_5'] = icons
+            self._set_gif_default_size(path)
             self.adv_labels[index].setText(os.path.basename(path))
             self.config_manager.set('visual', self.visual_config)
+
+    def _set_gif_default_size(self, path=None):
+        if apply_gif_size_default(self.visual_config, path):
+            with QSignalBlocker(self.width_slider), QSignalBlocker(self.height_slider):
+                self.width_slider.setValue(320)
+                self.height_slider.setValue(320)
+            self.width_value_label.setText('320 px')
+            self.height_value_label.setText('320 px')
+            self._resize_preview()
 
     def _resize_preview(self):
         if hasattr(self, 'preview_label'):
