@@ -87,18 +87,27 @@ class KillIconGifTests(unittest.TestCase):
             if isValid(movie): movie.stop(); movie.deleteLater()
         pump(20)
 
-    def test_finite_transparent_gif_keeps_animating_inside_display_window(self):
-        self.overlay.show_kill_icon(str(self.gif))
-        movie = self.movie()
-        self.assertIsNotNone(movie)
-        self.assertEqual(movie.currentFrameNumber(), 0)
-        image = movie.currentPixmap().toImage()
-        self.assertEqual(image.pixelColor(0, 0).alpha(), 0)
-        self.assertEqual(image.pixelColor(image.width()//2, image.height()//2).red(), 255)
-        frames = []; movie.frameChanged.connect(frames.append)
-        pump(650)
-        self.assertEqual(movie.state(), QMovie.Running)
-        self.assertGreaterEqual(frames.count(0), 2)
+    def test_gif_plays_once_and_holds_last_frame_even_if_file_requests_looping(self):
+        for loop in (None, 0, 2):
+            with self.subTest(loop=loop):
+                path = Path(self.temp.name)/f'once-{loop}.gif'
+                path.write_bytes(two_frame_gif(loop=loop))
+                self.overlay.show_kill_icon(str(path))
+                movie = self.movie()
+                self.assertIsNotNone(movie)
+                self.assertEqual(movie.currentFrameNumber(), 0)
+                image = movie.currentPixmap().toImage()
+                self.assertEqual(image.pixelColor(0, 0).alpha(), 0)
+                self.assertEqual(image.pixelColor(image.width()//2, image.height()//2).red(), 255)
+                frames = []; movie.frameChanged.connect(frames.append)
+                pump(650)
+                self.assertEqual(movie.state(), QMovie.NotRunning)
+                self.assertEqual(movie.currentFrameNumber(), 1)
+                self.assertNotIn(0, frames, 'the first frame must not repeat after initial playback')
+                image = movie.currentPixmap().toImage()
+                self.assertEqual(image.pixelColor(image.width()//2, image.height()//2).green(), 255)
+                self.assertFalse(self.overlay.kill_icon_label.isHidden())
+                self.assertTrue(self.overlay.kill_icon_timer.isActive())
 
     def test_followup_kill_restarts_first_frame_and_releases_old_movie(self):
         self.overlay.show_kill_icon(str(self.gif))

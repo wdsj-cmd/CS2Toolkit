@@ -29,7 +29,7 @@ class KillIconLabel(QLabel):
                 return False
             self._movie = movie
             self.setMovie(movie)
-            movie.finished.connect(self._repeat_movie)
+            movie.frameChanged.connect(self._stop_at_last_frame)
             movie.error.connect(self._decode_failed)
             movie.start()
             if self._movie is not movie or movie.currentPixmap().isNull():
@@ -42,12 +42,14 @@ class KillIconLabel(QLabel):
             self.setPixmap(pixmap)
         return True
 
-    def _repeat_movie(self):
+    def _stop_at_last_frame(self, frame):
         movie = self.sender()
-        if movie is self._movie and not self.isHidden():
-            # Even a GIF authored for one pass loops until its display timer
-            # expires. Replacing or hiding the label cancels this decoder.
-            movie.start()
+        if movie is self._movie:
+            count = movie.frameCount()
+            if count > 0 and frame == count-1:
+                # Ignore embedded loop metadata. Keep the last frame visible
+                # until the existing display timer fades the artwork out.
+                movie.stop()
 
     def clear_media(self):
         movie, self._movie = self._movie, None

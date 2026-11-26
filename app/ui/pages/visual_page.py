@@ -440,7 +440,7 @@ class KillIconDialog(MessageBoxBase):
 
         self.viewLayout.addWidget(self.adv_container)
 
-        self.viewLayout.addWidget(BodyLabel("支持透明 GIF；每次击杀从头播放，3 秒后淡出。", self))
+        self.viewLayout.addWidget(BodyLabel("支持透明 GIF；每次击杀只播放一次，3 秒后淡出。", self))
         self.preview_label = KillIconLabel(self)
         self.preview_label.hide()
         self.viewLayout.addWidget(self.preview_label, 0, Qt.AlignHCenter)
