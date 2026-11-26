@@ -16,7 +16,10 @@ from .game_window import GameWindowTracker
 from .music_pause_timer import TimerAnalyzer, PauseTimerDetector, pause_timer_region
 
 MAX_CLOCK_READS = 8
-BANNER_RECHECK_SECONDS = 5
+BANNER_RECHECK_SECONDS = 1
+RESUME_RECHECK_SECONDS = .35
+_PAUSE_TEAM = r'(?:ct|t|反恐精英|恐怖分子)(?:队伍|队|方)?'
+_TECHNICAL_PAUSE_BANNER = re.compile(rf'(?:{_PAUSE_TEAM})?技术暂停(?::?\d{{1,2}}:[0-5]\d)?')
 _PAUSE_BANNER_REJECT = re.compile(r'投票|申请|请求|失败|无法|未开始|未生效|vote|request|failed|timeoutsremaining')
 
 def round_clock_region(geometry):
@@ -44,11 +47,13 @@ def is_pause_banner(text):
     # At small HUD sizes OCR can read the team and "暂停还" while losing
     # "剩" or the digits. That active-team banner is already unambiguous;
     # requiring an exact remaining-time sentence discarded real timeouts.
-    team_remaining = re.search(r'^(?:ct|t|反恐精英|恐怖分子)(?:队伍|队|方)?暂停(?:还|剩)', compact)
+    team_remaining = re.match(rf'{_PAUSE_TEAM}暂停(?:还|剩)', compact)
+    # Technical timeouts can show the triggering side to both teams.
+    technical = _TECHNICAL_PAUSE_BANNER.fullmatch(compact)
     clock = bool(re.search(r'\d{1,2}:[0-5]\d', compact))
-    return bool(team_remaining or (clock and ('暂停还剩' in compact or '暂停剩余' in compact
+    return bool(team_remaining or technical or (clock and ('暂停还剩' in compact or '暂停剩余' in compact
                             or 'timeoutremaining' in compact or 'timeout' in compact))
-                or compact in ('比赛已暂停', '技术暂停', 'matchpaused', 'technicaltimeout', 'technicalpause'))
+                or compact in ('比赛已暂停', 'matchpaused', 'technicaltimeout', 'technicalpause'))
 
 
 def pause_banner_candidate(image):
@@ -301,6 +306,7 @@ class PauseBannerReader(WindowsClockReader):
         # Preserve the small pixel-font strokes only when the first pass
         # already resembles a pause banner. Normal scenery gets no extra OCR.
         hint = ('队' in compact and ('停' in compact or '还' in compact)
+                or '技术' in compact and ('暂' in compact or '停' in compact)
                 or 'timeout' in compact or 'paused' in compact)
         if hint:
             crisp = super().read(image, Qt.FastTransformation)
@@ -394,6 +400,8 @@ class RoundClockMonitor(QObject):
             reader_unavailable = False
             pause_reader_unavailable = False
             next_banner = 0
+            banner_confirmed = False
+            resume_checks = None
             next_clock_verify = 0
             clock_ocr_valid = None
             banner_text_seen = banner_pause_word = banner_clock = False
@@ -415,6 +423,8 @@ class RoundClockMonitor(QObject):
                         reported_timer_pause = None
                         last_pause_feedback = None
                         next_banner = 0
+                        banner_confirmed = False
+                        resume_checks = None
                         next_clock_verify = 0
                         clock_ocr_valid = None
                         banner_text_seen = banner_pause_word = banner_clock = False
@@ -427,6 +437,9 @@ class RoundClockMonitor(QObject):
                     if feedback is not None:
                         if feedback != last_pause_feedback:
                             timer_detector.seed(bool(feedback))
+                            resume_checks = None
+                            if not feedback:
+                                banner_confirmed = False
                         if last_pause_feedback is True and feedback is False:
                             next_banner = 0
                         last_pause_feedback = feedback
@@ -449,6 +462,9 @@ class RoundClockMonitor(QObject):
                     attempts = 0
                 was_active = active
                 was_foreground = bool(hwnd)
+                if (not hwnd or not pause_active) and resume_checks is not None:
+                    timer_detector.seed(True)
+                    resume_checks = None
                 if not hwnd:
                     readings.reset()
                     timer_detector.suspend()
@@ -502,32 +518,54 @@ class RoundClockMonitor(QObject):
                                         pause_ocr_error = type(error).__name__
                                 decision = timer_detector.observe(view, observed_at, clock_seconds)
                                 evidence = 'timer_bars' if view.kind == 'bars' else 'timer_frozen_red_verified' if decision is True else 'timer_moving'
-                                # The banner is an optional positive hint only.
-                                # Its disappearance (e.g. behind the buy menu)
-                                # can never stop an established pause.
+                                if decision is False:
+                                    # The changing clock might be the timeout's own countdown.
+                                    resume_checks = 0
+                                    next_banner = 0
+                                    decision = None
+                                if resume_checks is not None and (view.kind != 'clock' or view.layout_changed or decision is True):
+                                    timer_detector.seed(True)
+                                    resume_checks = None
                                 if (decision is None and not timer_detector.paused
-                                        and (view.kind == 'unknown' or not view.red)
-                                        and now >= next_banner and not pause_reader_unavailable):
-                                    banner_frame = source.grab(pause_banner_region(geometry))
-                                    if pause_banner_candidate(banner_frame) is True:
-                                        try:
-                                            if pause_reader is None:
-                                                pause_reader = self.pause_reader_factory()
-                                            text = pause_reader.read(banner_frame)
-                                            compact = re.sub(r'\s+', '', text).lower().replace('：', ':')
-                                            banner_text_seen = bool(compact)
-                                            banner_pause_word = '暂停' in compact or 'timeout' in compact or 'paused' in compact
-                                            banner_clock = bool(re.search(r'\d{1,2}:[0-5]\d', compact))
-                                            if is_pause_banner(text):
-                                                timer_detector.seed(True)
-                                                decision, evidence = True, 'hud_banner'
-                                        except Exception as error:
-                                            pause_reader_unavailable = True
-                                            pause_ocr_error = type(error).__name__
-                                    next_banner = time.monotonic()+1
+                                        and view.kind != 'bars' and now >= next_banner
+                                        and (not pause_reader_unavailable or resume_checks is not None)):
+                                    visible_pause = False
+                                    if not pause_reader_unavailable:
+                                        banner_frame = source.grab(pause_banner_region(geometry))
+                                        banner_text_seen = banner_pause_word = banner_clock = False
+                                        if pause_banner_candidate(banner_frame) is True:
+                                            try:
+                                                if pause_reader is None:
+                                                    pause_reader = self.pause_reader_factory()
+                                                text = pause_reader.read(banner_frame)
+                                                compact = re.sub(r'\s+', '', text).lower().replace('：', ':')
+                                                banner_text_seen = bool(compact)
+                                                banner_pause_word = '暂停' in compact or 'timeout' in compact or 'paused' in compact
+                                                banner_clock = bool(re.search(r'\d{1,2}:[0-5]\d', compact))
+                                                visible_pause = is_pause_banner(text)
+                                            except Exception as error:
+                                                pause_reader_unavailable = True
+                                                pause_ocr_error = type(error).__name__
+                                    next_banner = time.monotonic() + (
+                                        RESUME_RECHECK_SECONDS if resume_checks is not None else BANNER_RECHECK_SECONDS)
+                                    if visible_pause:
+                                        banner_confirmed = True
+                                        timer_detector.seed(True)
+                                        if resume_checks is None:
+                                            decision, evidence = True, 'hud_banner'
+                                        resume_checks = None
+                                    elif resume_checks is not None:
+                                        # A briefly hidden banner cannot end a confirmed pause.
+                                        resume_checks += 1
+                                        if resume_checks >= (2 if banner_confirmed else 1):
+                                            banner_confirmed = False
+                                            resume_checks = None
+                                            decision, evidence = False, 'timer_moving_banner_clear'
                                 if time.monotonic() >= self._next_pause_status:
                                     self._pause_status('timer_sample', window_size=list(geometry[2:]),
-                                        timer_kind=view.kind, red=view.red, paused=timer_detector.paused,
+                                        timer_kind=view.kind, red=view.red,
+                                        paused=timer_detector.paused or resume_checks is not None,
+                                        resume_pending=resume_checks is not None,
                                         layout_changed=view.layout_changed,
                                         clock_ocr_valid=clock_ocr_valid,
                                         banner_text_seen=banner_text_seen, banner_pause_word=banner_pause_word,
@@ -555,7 +593,8 @@ class RoundClockMonitor(QObject):
                                             self._status('正在读取顶部计时器')
                     elif pause_active:
                         self._pause_status('missing_geometry')
-                    interval = .5 if pause_active else (1 if readings.confirmed else .5)
+                    interval = (RESUME_RECHECK_SECONDS if resume_checks is not None
+                                else .5 if pause_active or not readings.confirmed else 1)
                     next_sample = time.monotonic()+interval
                 self._stop.wait(.1)
         except Exception as error:

@@ -51,6 +51,14 @@ class PauseIconTests(unittest.TestCase):
             self.assertFalse(is_pause_banner(text), text)
         self.assertEqual(pause_banner_region((0, 0, 2560, 1440)), (920, 994, 720, 86))
 
+    def test_technical_pause_team_and_countdown_are_not_vote_prompts(self):
+        for text in ('T技术暂停 2:00', 'CT 技术暂停 1：59', '技术暂停 2:00',
+                     '反恐精英队技术暂停 0:42', 'T 技术暂停'):
+            self.assertTrue(is_pause_banner(text), text)
+        for text in ('T技术暂停请求 2:00', '投票通过：T技术暂停 2:00',
+                     '发起技术暂停 2:00', '技术暂停还未生效 2:00'):
+            self.assertFalse(is_pause_banner(text), text)
+
     def test_active_team_banner_survives_actual_small_font_ocr_corruption(self):
         # Real OCR result from the reported small HUD, with no player data.
         for text in ('T 队 暂 停 还 9 闫 4', 'CT队暂停还刂0：', 'T队暂停剩余',
@@ -198,15 +206,16 @@ class HudPauseMusicTests(unittest.TestCase):
         key = key or (self.controller.engine.map_name, self.controller.engine.round_number)
         self.controller.clock_monitor.pause_sampled.emit(key, paused, time.monotonic()-age)
 
-    def test_normal_player_pause_plays_and_fades_without_spectator_fields(self):
+    def test_normal_player_pause_stops_on_timer_resume_without_spectator_fields(self):
         self.prepare(); self.visual(True)
         self.assertEqual(self.names(), ['freeze_time', 'timeout'])
         self.packet()
         self.assertTrue(self.controller.engine.round_paused)
         self.assertEqual(self.controller.engine.pause_source, 'hud')
+        stops = self.player.stops
         self.visual(False)
-        self.assertEqual(self.player.fade_requests, [1200])
-        self.player.faded_out.emit()
+        self.assertGreater(self.player.stops, stops)
+        self.assertFalse(self.player.fade_requests)
         self.assertEqual(self.names(), ['freeze_time', 'timeout', 'freeze_time'])
 
     def test_stage_change_waits_for_timer_motion_before_ending_hud_pause(self):
@@ -215,20 +224,22 @@ class HudPauseMusicTests(unittest.TestCase):
         self.assertTrue(self.controller._pause_active)
         self.assertFalse(self.player.fade_requests)
         self.assertTrue(self.controller.clock_monitor.pause_context[4])
+        stops = self.player.stops
         self.visual(False)
-        self.assertEqual(self.player.fade_requests, [1200])
-        self.player.faded_out.emit()
+        self.assertGreater(self.player.stops, stops)
+        self.assertFalse(self.player.fade_requests)
         self.assertEqual(self.names()[-1], 'round_start')
 
-    def test_live_pause_survives_live_heartbeats_and_fades_when_banner_clears(self):
+    def test_live_pause_survives_live_heartbeats_and_stops_when_banner_clears(self):
         self.prepare(); self.packet(phase='live'); self.visual(True)
         self.assertEqual(self.names()[-1], 'timeout')
         for _ in range(4): self.packet(phase='live')
         self.assertTrue(self.controller.engine.round_paused)
         self.assertFalse(self.player.fade_requests)
+        stops = self.player.stops
         self.visual(False)
-        self.assertEqual(self.player.fade_requests, [1200])
-        self.player.faded_out.emit()
+        self.assertGreater(self.player.stops, stops)
+        self.assertFalse(self.player.fade_requests)
         self.assertEqual(self.names()[-1], 'round_start')
 
     def test_hidden_banner_and_buy_menu_do_not_restart_pause_music(self):
@@ -242,7 +253,7 @@ class HudPauseMusicTests(unittest.TestCase):
             if region == timer else picture if shown[0] else scene, close=lambda: None)
         def read(image):
             calls.append(True)
-            return 'T队暂停还剩0:44' if len(calls) == 1 else 'T 队 停 0：'
+            return 'T 队 停 0：'
         reader = SimpleNamespace(read=read, close=lambda: None)
         def read_clock(image): numeric_calls.append(True); return '1:26'
         clock_reader = SimpleNamespace(read=read_clock, close=lambda: None)
@@ -263,7 +274,7 @@ class HudPauseMusicTests(unittest.TestCase):
             monitor.set_pause_context(key, True, now, False, False); monitor.start()
             try:
                 pump(4.8)
-                self.assertFalse(calls)
+                self.assertTrue(calls)
                 self.assertEqual(len(numeric_calls), 2)
                 self.assertEqual(self.names().count('timeout'), 1)
                 self.assertFalse(self.player.fade_requests)
@@ -271,8 +282,10 @@ class HudPauseMusicTests(unittest.TestCase):
                 shown[0] = False; pump(1.8)
                 self.assertFalse(self.player.fade_requests)
                 self.assertEqual(self.names().count('timeout'), 1)
-                moving[0] = True; pump(1.3)
-                self.assertEqual(self.player.fade_requests, [1200])
+                stops = self.player.stops
+                moving[0] = True; pump(1.5)
+                self.assertGreater(self.player.stops, stops)
+                self.assertFalse(self.player.fade_requests)
                 self.assertFalse(self.controller.engine.round_paused)
             finally:
                 self.assertTrue(monitor.stop())
@@ -289,8 +302,10 @@ class HudPauseMusicTests(unittest.TestCase):
         self.assertEqual(self.names().count('timeout'), 1)
         self.controller.clock_monitor.game_visibility_changed.emit(True, True)
         self.assertFalse(self.player.fade_requests)
+        stops = self.player.stops
         self.visual(False)
-        self.assertEqual(self.player.fade_requests, [1200])
+        self.assertGreater(self.player.stops, stops)
+        self.assertFalse(self.player.fade_requests)
 
     def test_background_gsi_authoritative_resume_is_applied_on_return(self):
         self.prepare(); self.packet('timeout_ct')
@@ -305,8 +320,10 @@ class HudPauseMusicTests(unittest.TestCase):
         self.packet(activity='menu')
         self.assertTrue(self.controller.clock_monitor.pause_context[1])
         self.assertEqual(self.names().count('timeout'), 1)
+        stops = self.player.stops
         self.visual(False)
-        self.assertEqual(self.player.fade_requests, [1200])
+        self.assertGreater(self.player.stops, stops)
+        self.assertFalse(self.player.fade_requests)
 
     def test_closed_game_clears_background_pause_without_restarting(self):
         self.prepare(); self.visual(True)
@@ -535,6 +552,65 @@ class PauseWorkerTests(unittest.TestCase):
         finally:
             self.assertTrue(monitor.stop())
 
+    def test_moving_timeout_countdown_cannot_restart_banner_pause(self):
+        detections, ocr_calls = [], []
+        geometry = (0, 0, 2560, 1440)
+        tracker = SimpleNamespace(find=lambda: 42, client_geometry=lambda hwnd: geometry,
+            user32=SimpleNamespace(GetForegroundWindow=lambda: 42))
+        timer = ['0:30']
+        timer_samples = []
+        shown, miss_once = [True], [False]
+        scene = QImage(450, 54, QImage.Format_RGB32); scene.fill(QColor('#807060'))
+        def grab(region):
+            if region == pause_timer_region(geometry):
+                value = timer[0]
+                timer_samples.append(value)
+                return timer_frame(value, red=False)
+            if miss_once[0]:
+                miss_once[0] = False
+                return scene
+            return banner() if shown[0] else scene
+        def read(image):
+            ocr_calls.append(time.monotonic())
+            return 'T技术暂停 0:14'
+        monitor = RoundClockMonitor(source_factory=lambda: SimpleNamespace(grab=grab, close=lambda: None),
+            tracker_factory=lambda: tracker,
+            pause_reader_factory=lambda: SimpleNamespace(read=read, close=lambda: None))
+        key = ('map', 1)
+        monitor.pause_sampled.connect(lambda key, active, at: detections.append(active))
+        def refresh(milliseconds):
+            end = time.monotonic()+milliseconds/1000
+            while time.monotonic() < end:
+                now = time.monotonic()
+                monitor.set_context(key, False, now)
+                monitor.set_pause_context(key, True, now, True)
+                base.pump(20)
+        refresh(1)
+        monitor.start()
+        try:
+            refresh(750)
+            self.assertEqual(detections, [True])
+            miss_once[0] = True  # The first recheck sees a briefly obscured banner.
+            for value in ('0:29', '0:28', '0:27'):
+                timer[0] = value
+                refresh(1200)
+                self.assertEqual(detections, [True])
+            self.assertGreaterEqual(len(ocr_calls), 2)
+            shown[0], timer[0] = False, '1:40'
+            # Keep each fixture visible until the worker has actually sampled it.
+            # Wall-clock sleeps can skip a frame when the build is also running.
+            deadline = time.monotonic()+3
+            while timer_samples.count('1:40') < 3 and time.monotonic() < deadline:
+                refresh(25)
+            self.assertGreaterEqual(timer_samples.count('1:40'), 3)
+            timer[0] = '1:39'
+            deadline = time.monotonic()+3
+            while detections == [True] and time.monotonic() < deadline:
+                refresh(25)
+            self.assertEqual(detections, [True, False])
+        finally:
+            self.assertTrue(monitor.stop())
+
     def test_diagnostic_reports_are_rate_limited_and_can_report_fatal_failure(self):
         monitor = RoundClockMonitor()
         reports = []
@@ -574,13 +650,13 @@ class PauseWorkerTests(unittest.TestCase):
         finally:
             self.assertTrue(monitor.stop())
 
-    def test_banner_is_independent_of_icon_and_ocr_runs_at_most_once_per_second(self):
+    def test_t_technical_pause_starts_with_red_freezetime_clock(self):
         banner_reads, detected, evidence = [], [], []
         tracker = SimpleNamespace(find=lambda: 42, client_geometry=lambda hwnd: (0, 0, 2560, 1440),
             user32=SimpleNamespace(GetForegroundWindow=lambda: 42))
-        source = SimpleNamespace(grab=lambda region: timer_frame(red=False)
+        source = SimpleNamespace(grab=lambda region: timer_frame(red=True)
             if region == pause_timer_region((0, 0, 2560, 1440)) else banner(), close=lambda: None)
-        def read(image): banner_reads.append(time.monotonic()); return 'T队暂停还剩 0:14'
+        def read(image): banner_reads.append(time.monotonic()); return 'T技术暂停 2:00'
         reader = SimpleNamespace(read=read, close=lambda: None)
         monitor = RoundClockMonitor(source_factory=lambda: source, tracker_factory=lambda: tracker,
             pause_reader_factory=lambda: reader)
@@ -588,7 +664,7 @@ class PauseWorkerTests(unittest.TestCase):
         monitor.pause_diagnostic.connect(lambda details: evidence.append(details))
         key = ('map', 1)
         monitor.set_context(key, False, time.monotonic())
-        monitor.set_pause_context(key, True, time.monotonic())
+        monitor.set_pause_context(key, True, time.monotonic(), live_round=False)
         monitor.start()
         try:
             base.pump(1450)

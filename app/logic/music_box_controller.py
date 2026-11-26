@@ -295,7 +295,8 @@ class MusicBoxController(QObject):
         self._pause_cue = None
         self._pause_was_visual = False
         self._pause_round_key = None
-        self.diagnostic.emit('music_timeout', {'active': False, 'fade_ms': 1200})
+        fade_ms = 0 if visual_end else 1200
+        self.diagnostic.emit('music_timeout', {'active': False, 'fade_ms': fade_ms})
         if not self._pause_was_played:
             self._pause_return_choice = None
             return False
@@ -304,10 +305,10 @@ class MusicBoxController(QObject):
         playing, self._pause_music_playing = self._pause_music_playing, False
         if playing and self.enabled and not self.previewing and not self._team_menu_open:
             fade = getattr(self.player, 'fade_stop', None)
-            if fade is not None and fade(1200):
+            if fade_ms and fade is not None and fade(fade_ms):
                 self._status('暂停结束，音乐正在渐弱…')
                 return True
-            if fade is None:
+            if not fade_ms or fade is None:
                 self.player.stop()
         self._pause_fade_finished()
         return True
