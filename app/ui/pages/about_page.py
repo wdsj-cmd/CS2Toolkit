@@ -82,9 +82,11 @@ class AboutPage(QWidget):
         self.check_update_btn = PushButton("检查更新")
         layout.addWidget(self.check_update_btn, 0, Qt.AlignTop)
 
-        self.offline_game_btn = PushButton("离线小游戏调试（无需断网）")
-        self.offline_game_btn.setToolTip("试玩恐龙小游戏和 Wi-Fi 陨石动画；按 Esc 返回工具箱")
-        layout.addWidget(self.offline_game_btn, 0, Qt.AlignTop)
+        self.offline_game_btn = None
+        if self.parent.config_manager.get('offline_game_debug', False) is True:
+            self.offline_game_btn = PushButton("离线小游戏调试（无需断网）")
+            self.offline_game_btn.setToolTip("试玩恐龙小游戏和 Wi-Fi 陨石动画；按 Esc 返回工具箱")
+            layout.addWidget(self.offline_game_btn, 0, Qt.AlignTop)
 
         self.sponsorship_btn = None
         if os.path.isfile(self._get_sponsorship_image_path()):
@@ -201,6 +203,7 @@ class AboutPage(QWidget):
 
     def _connect_signals(self):
         self.check_update_btn.clicked.connect(self.parent.check_for_updates)
-        self.offline_game_btn.clicked.connect(self.parent.show_offline_preview)
+        if self.offline_game_btn is not None:
+            self.offline_game_btn.clicked.connect(self.parent.show_offline_preview)
         if self.sponsorship_btn is not None:
             self.sponsorship_btn.clicked.connect(self._show_sponsorship_dialog)
