@@ -4,6 +4,7 @@
 
 ## 项目状态
 
+- 当前测试版本：`1.5.4.bate`
 - 技术栈：`Python`、`PySide6`、`PySide6-Fluent-Widgets`
 - 当前平台：`Windows 10/11`
 - 主要依赖：`PySide6`、`PySide6-Fluent-Widgets`、`requests`、`pycaw`
