@@ -36,6 +36,24 @@ def timer_frame(text='1:26', resolution=(1440, 900), scale=1, red=True, bars=Fal
 
 
 class PauseTimerTests(unittest.TestCase):
+    def test_small_pause_mark_shift_replaces_empty_cached_crop(self):
+        for initial_y, shifted_y in ((5, 12), (12, 5)):
+            with self.subTest(initial_y=initial_y, shifted_y=shifted_y):
+                analyzer = TimerAnalyzer()
+                views = []
+                for y in (initial_y, shifted_y, shifted_y):
+                    image = QImage(200, 96, QImage.Format_RGB32)
+                    image.fill(Qt.black)
+                    painter = QPainter(image)
+                    for x in (96, 100):
+                        painter.fillRect(x, y, 2, 5, QColor(255, 0, 0))
+                    painter.end()
+                    views.append(analyzer.analyze(image))
+                self.assertEqual([view.kind for view in views], ['bars', 'bars', 'bars'])
+                self.assertTrue(views[1].layout_changed)
+                self.assertFalse(views[2].layout_changed)
+                self.assertTrue(same_timer(views[0].pattern, views[1].pattern))
+
     RESOLUTIONS = ((720, 480), (800, 600), (1024, 768), (1280, 720), (1440, 900),
                    (1920, 1080), (3440, 1440), (3840, 2160))
 

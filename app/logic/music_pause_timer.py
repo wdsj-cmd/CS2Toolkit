@@ -127,6 +127,13 @@ class TimerAnalyzer:
             self.box = chosen
         left, top, right, bottom = self.box
         mask = (red if is_red else white)[top:bottom, left:right]
+        if not mask.any():
+            # A tiny HUD mark can leave the cached crop before exceeding the
+            # usual jitter threshold. Use the current, validated candidate.
+            self.box = chosen
+            changed = True
+            left, top, right, bottom = chosen
+            mask = (red if is_red else white)[top:bottom, left:right]
         raw = (mask.astype(np.uint8)*255).copy()
         glyph = QImage(raw.data, raw.shape[1], raw.shape[0], raw.shape[1], QImage.Format_Grayscale8).copy()
         # OCR needs a tight text line with a little breathing room. A wide
