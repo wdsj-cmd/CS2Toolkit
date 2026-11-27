@@ -1,4 +1,17 @@
-"""Initial GIF icon dimensions, shared by settings and the overlay."""
+"""GIF icon settings shared by the settings page and game overlay."""
+import math
+
+
+def gif_max_duration_ms(visual):
+    """Keep imported durations finite and within the editable 0.1–30 s range."""
+    value = visual.get('kill_icon_gif_max_seconds', 3.0)
+    try:
+        seconds = float(value) if not isinstance(value, bool) else 3.0
+    except (TypeError, ValueError):
+        seconds = 3.0
+    if not math.isfinite(seconds):
+        seconds = 3.0
+    return round(min(30.0, max(.1, seconds))*1000)
 
 
 def apply_gif_size_default(visual, selected_path=None):

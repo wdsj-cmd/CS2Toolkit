@@ -1,11 +1,11 @@
 import os
 from ...logic.flash_background import flash_image_extensions
-from ...logic.kill_icon_config import apply_gif_size_default
+from ...logic.kill_icon_config import apply_gif_size_default, gif_max_duration_ms
 from ..kill_icon_label import KillIconLabel
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFileDialog, QColorDialog
 from PySide6.QtCore import Qt, QTimer, QSize, QPropertyAnimation, QSignalBlocker
 from qfluentwidgets import (ScrollArea, SettingCardGroup, SwitchSettingCard, SettingCard,
-                           PushSettingCard, PushButton, FluentIcon as FIF, LineEdit, MessageBoxBase, SubtitleLabel, BodyLabel, SwitchButton, Slider, InfoBar)
+                           PushSettingCard, PushButton, FluentIcon as FIF, LineEdit, MessageBoxBase, SubtitleLabel, BodyLabel, SwitchButton, Slider, InfoBar, DoubleSpinBox)
 
 
 def _web_only_targets(config_manager, visual_config):
@@ -414,6 +414,18 @@ class KillIconDialog(MessageBoxBase):
         bottom_layout.addWidget(self.bottom_value_label)
         basic_layout.addLayout(bottom_layout)
 
+        duration_layout = QHBoxLayout()
+        duration_layout.addWidget(BodyLabel("GIF 最长播放时间:"))
+        self.gif_duration_spin = DoubleSpinBox(self)
+        self.gif_duration_spin.setRange(.1, 30)
+        self.gif_duration_spin.setDecimals(1)
+        self.gif_duration_spin.setSingleStep(.1)
+        self.gif_duration_spin.setSuffix(" 秒")
+        self.gif_duration_spin.setValue(gif_max_duration_ms(self.visual_config)/1000)
+        self.gif_duration_spin.valueChanged.connect(self._on_gif_duration_changed)
+        duration_layout.addWidget(self.gif_duration_spin, 1)
+        basic_layout.addLayout(duration_layout)
+
         self.viewLayout.addWidget(self.basic_container)
 
         # 高级设置容器
@@ -443,7 +455,7 @@ class KillIconDialog(MessageBoxBase):
 
         self.viewLayout.addWidget(self.adv_container)
 
-        self.viewLayout.addWidget(BodyLabel("支持透明 GIF；每次击杀只播放一次，3 秒后淡出。", self))
+        self.viewLayout.addWidget(BodyLabel("GIF 只播放一次，播完或达到上限后立即消失。", self))
         self.preview_label = KillIconLabel(self)
         self.preview_label.hide()
         self.viewLayout.addWidget(self.preview_label, 0, Qt.AlignHCenter)
@@ -456,6 +468,7 @@ class KillIconDialog(MessageBoxBase):
         self.preview_timer.setSingleShot(True)
         self.preview_timer.timeout.connect(self.preview_fade.start)
         self.preview_label.failed.connect(self._clear_preview)
+        self.preview_label.finished.connect(self._clear_preview)
 
         self._update_visibility()
         self.widget.setMinimumWidth(450)
@@ -479,6 +492,10 @@ class KillIconDialog(MessageBoxBase):
         self.visual_config['kill_icon_size_customized'] = True
         self.config_manager.set('visual', self.visual_config)
         self._resize_preview()
+
+    def _on_gif_duration_changed(self, value):
+        self.visual_config['kill_icon_gif_max_seconds'] = value
+        self.config_manager.set('visual', self.visual_config)
 
     def _on_height_changed(self, value):
         self.height_value_label.setText(f"{value} px")
@@ -529,12 +546,13 @@ class KillIconDialog(MessageBoxBase):
         path = (self.visual_config.get('kill_icon_path', '') if index is None
                 else self.visual_config['kill_icons_1_5'][index].get('path', ''))
         self._resize_preview()
-        if not self.preview_label.set_media(path):
+        if not self.preview_label.set_media(path, gif_max_duration_ms(self.visual_config)):
             InfoBar.warning("无法预览", "请选择可读取的静态图片或 GIF；视频请在游戏内查看。", parent=self)
             return
         self.preview_label.mediaOpacity = 1.0
         self.preview_label.show()
-        self.preview_timer.start(3000)
+        if self.preview_label.movie() is None:
+            self.preview_timer.start(3000)
 
     def _clear_preview(self):
         self.preview_timer.stop()

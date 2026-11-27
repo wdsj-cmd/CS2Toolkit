@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from PySide6.QtCore import QCoreApplication, QEvent, Qt
+from PySide6.QtCore import QAbstractAnimation, QCoreApplication, QEvent, Qt
 from PySide6.QtGui import QImage, QImageReader, QMovie
 from PySide6.QtWidgets import QApplication, QPushButton, QWidget
 from shiboken6 import isValid
@@ -28,14 +28,14 @@ def pump(milliseconds):
         time.sleep(.005)
 
 
-def two_frame_gif(loop=None):
+def two_frame_gif(loop=None, delay_cs=12, colours=(1, 2)):
     """Hand-built 4x4 GIF: transparent border, red then green centre."""
     result = b'GIF89a'+struct.pack('<HHBBB', 4, 4, 0x81, 0, 0)
     result += bytes((0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255))
     if loop is not None:
         result += b'\x21\xff\x0bNETSCAPE2.0\x03\x01'+struct.pack('<H', loop)+b'\x00'
-    for colour in (1, 2):
-        result += b'\x21\xf9\x04\x09\x0c\x00\x00\x00'
+    for colour in colours:
+        result += b'\x21\xf9\x04\x09'+struct.pack('<H', delay_cs)+b'\x00\x00'
         result += b'\x2c'+struct.pack('<HHHHB', 0, 0, 4, 4, 0)
         codes = []
         for y in range(4):
@@ -87,7 +87,7 @@ class KillIconGifTests(unittest.TestCase):
             if isValid(movie): movie.stop(); movie.deleteLater()
         pump(20)
 
-    def test_gif_plays_once_and_holds_last_frame_even_if_file_requests_looping(self):
+    def test_gif_plays_once_and_disappears_after_last_frame_delay_even_if_looping(self):
         for loop in (None, 0, 2):
             with self.subTest(loop=loop):
                 path = Path(self.temp.name)/f'once-{loop}.gif'
@@ -100,14 +100,18 @@ class KillIconGifTests(unittest.TestCase):
                 self.assertEqual(image.pixelColor(0, 0).alpha(), 0)
                 self.assertEqual(image.pixelColor(image.width()//2, image.height()//2).red(), 255)
                 frames = []; movie.frameChanged.connect(frames.append)
-                pump(650)
+                pump(160)
                 self.assertEqual(movie.state(), QMovie.NotRunning)
                 self.assertEqual(movie.currentFrameNumber(), 1)
                 self.assertNotIn(0, frames, 'the first frame must not repeat after initial playback')
                 image = movie.currentPixmap().toImage()
                 self.assertEqual(image.pixelColor(image.width()//2, image.height()//2).green(), 255)
                 self.assertFalse(self.overlay.kill_icon_label.isHidden())
-                self.assertTrue(self.overlay.kill_icon_timer.isActive())
+                pump(180)
+                self.assertTrue(self.overlay.kill_icon_label.isHidden())
+                self.assertIsNone(self.overlay.kill_icon_label.movie())
+                self.assertFalse(self.overlay.kill_icon_timer.isActive())
+                self.assertFalse(isValid(movie))
 
     def test_followup_kill_restarts_first_frame_and_releases_old_movie(self):
         self.overlay.show_kill_icon(str(self.gif))
@@ -119,7 +123,61 @@ class KillIconGifTests(unittest.TestCase):
         self.assertEqual(current.currentFrameNumber(), 0)
         pump(30)
         self.assertFalse(isValid(old), 'the replaced GIF decoder must be destroyed')
-        self.assertGreater(self.overlay.kill_icon_timer.remainingTime(), 2800)
+        pump(90)
+        self.assertFalse(self.overlay.kill_icon_label.isHidden(), 'the replaced GIF must not end the new one')
+        pump(180)
+        self.assertTrue(self.overlay.kill_icon_label.isHidden())
+
+    def test_single_frame_gif_keeps_its_frame_delay_then_disappears(self):
+        path = Path(self.temp.name)/'single.gif'
+        path.write_bytes(two_frame_gif(loop=0, delay_cs=20, colours=(1,)))
+        self.overlay.show_kill_icon(str(path))
+        movie = self.movie()
+        pump(80)
+        self.assertFalse(self.overlay.kill_icon_label.isHidden())
+        pump(200)
+        self.assertTrue(self.overlay.kill_icon_label.isHidden())
+        self.assertFalse(isValid(movie))
+
+    def test_gif_maximum_ends_long_animation_without_static_image_fade(self):
+        path = Path(self.temp.name)/'long.gif'
+        path.write_bytes(two_frame_gif(loop=0, delay_cs=100))
+        self.overlay.kill_icon_gif_max_ms = 200
+        self.overlay.show_kill_icon(str(path))
+        movie = self.movie()
+        pump(90)
+        self.assertFalse(self.overlay.kill_icon_label.isHidden())
+        pump(170)
+        self.assertTrue(self.overlay.kill_icon_label.isHidden())
+        self.assertFalse(isValid(movie))
+        self.assertEqual(self.overlay.kill_icon_fade_out.state(), QAbstractAnimation.Stopped)
+
+    def test_custom_duration_above_three_seconds_allows_longer_gif(self):
+        path = Path(self.temp.name)/'extended.gif'
+        path.write_bytes(two_frame_gif(loop=0, delay_cs=300))
+        self.overlay.kill_icon_gif_max_ms = 4000
+        self.overlay.show_kill_icon(str(path))
+        movie = self.movie()
+        pump(3200)
+        self.assertFalse(self.overlay.kill_icon_label.isHidden())
+        pump(950)
+        self.assertTrue(self.overlay.kill_icon_label.isHidden())
+        self.assertFalse(isValid(movie))
+
+    def test_static_icon_keeps_original_three_second_display(self):
+        self.overlay.kill_icon_gif_max_ms = 100
+        self.overlay.show_kill_icon(str(self.png))
+        pump(200)
+        self.assertFalse(self.overlay.kill_icon_label.isHidden())
+        self.assertGreater(self.overlay.kill_icon_timer.remainingTime(), 2600)
+
+    def test_switch_to_static_cancels_old_gif_completion(self):
+        self.overlay.show_kill_icon(str(self.gif))
+        pump(160)
+        self.overlay.show_kill_icon(str(self.png))
+        pump(200)
+        self.assertFalse(self.overlay.kill_icon_label.isHidden())
+        self.assertEqual(self.overlay.kill_icon_label.pixmap().toImage().pixelColor(0, 0), Qt.blue)
 
     def test_switch_to_static_image_releases_gif_and_shows_new_artwork(self):
         self.overlay.show_kill_icon(str(self.gif))
@@ -129,10 +187,10 @@ class KillIconGifTests(unittest.TestCase):
         self.assertIsNone(self.overlay.kill_icon_label.movie())
         self.assertEqual(self.overlay.kill_icon_label.pixmap().toImage().pixelColor(0, 0), Qt.blue)
 
-    def test_auto_hide_fades_and_releases_decoder(self):
+    def test_natural_end_cancels_display_and_releases_decoder(self):
         self.overlay.show_kill_icon(str(self.gif))
         old = self.movie()
-        pump(3700)
+        pump(380)
         self.assertTrue(self.overlay.kill_icon_label.isHidden())
         self.assertFalse(self.overlay.kill_icon_timer.isActive())
         self.assertFalse(isValid(old))
@@ -199,6 +257,36 @@ class KillIconGifTests(unittest.TestCase):
 class KillIconSizeDefaultsTests(unittest.TestCase):
     setUp = KillIconGifTests.setUp
     close_overlay = KillIconGifTests.close_overlay
+
+    def test_gif_duration_control_persists_and_reaches_game_overlay(self):
+        config = Config()
+        dialog = self.dialog(config)
+        self.assertEqual(dialog.gif_duration_spin.value(), 3.0)
+        dialog.gif_duration_spin.setValue(.4)
+        dialog.close()
+        self.assertEqual(config.get('visual')['kill_icon_gif_max_seconds'], .4)
+        reopened = self.dialog(config)
+        self.assertEqual(reopened.gif_duration_spin.value(), .4)
+        handler = VisualHandler(config)
+        try:
+            self.assertEqual(handler.overlay.kill_icon_gif_max_ms, 400)
+        finally:
+            handler.cleanup(); handler.deleteLater(); pump(20)
+
+    def test_runtime_duration_rejects_invalid_values_and_bounds_imported_settings(self):
+        config = Config()
+        handler = VisualHandler(config)
+        try:
+            self.assertEqual(handler.overlay.kill_icon_gif_max_ms, 3000)
+            for value, milliseconds in ((None, 3000), ('bad', 3000), (True, 3000),
+                                         (float('nan'), 3000), (float('inf'), 3000),
+                                         (-1, 100), (0, 100), (.25, 250), (99, 30000)):
+                with self.subTest(value=value):
+                    config.set('visual', {'kill_icon_gif_max_seconds': value})
+                    handler._update_config(force=True)
+                    self.assertEqual(handler.overlay.kill_icon_gif_max_ms, milliseconds)
+        finally:
+            handler.cleanup(); handler.deleteLater(); pump(20)
 
     def dialog(self, config):
         parent = QWidget(); parent.resize(900, 900)
@@ -274,18 +362,44 @@ class KillIconSizeDefaultsTests(unittest.TestCase):
 class KillIconPreviewTests(unittest.TestCase):
     def test_preview_draws_inside_dialog_and_fades_in_place(self):
         with tempfile.TemporaryDirectory() as folder:
-            path = Path(folder)/'visible.gif'; path.write_bytes(two_frame_gif())
+            path = Path(folder)/'visible.png'
+            image = QImage(4, 4, QImage.Format_ARGB32); image.fill(Qt.red); image.save(str(path))
             parent = QWidget(); parent.resize(900, 900); parent.show()
             dialog = KillIconDialog(Config({'kill_icon_path': str(path)}), parent)
             try:
                 dialog.show(); dialog._preview_icon(); pump(250)
                 centre = dialog.preview_label.mapTo(dialog, dialog.preview_label.rect().center())
                 colour = dialog.grab().toImage().pixelColor(centre)
-                self.assertLess(colour.blue(), 64, 'the red/green GIF must be drawn inside its preview rectangle')
+                self.assertLess(colour.blue(), 64, 'the artwork must be drawn inside its preview rectangle')
                 pump(3050)
                 colour = dialog.grab().toImage().pixelColor(centre)
                 self.assertGreater(colour.blue(), 64)
                 self.assertLess(colour.blue(), 255)
+            finally:
+                dialog.close(); parent.close(); dialog.deleteLater(); parent.deleteLater(); pump(30)
+
+    def test_preview_gif_natural_end_and_configured_limit_match_overlay_behavior(self):
+        with tempfile.TemporaryDirectory() as folder:
+            short = Path(folder)/'short.gif'; short.write_bytes(two_frame_gif(loop=0))
+            long = Path(folder)/'long.gif'; long.write_bytes(two_frame_gif(loop=0, delay_cs=100))
+            parent = QWidget(); parent.resize(900, 900); parent.show()
+            config = Config({'kill_icon_path': str(short), 'kill_icon_is_advanced': True,
+                             'kill_icons_1_5': [{'path': str(long)}]})
+            dialog = KillIconDialog(config, parent)
+            try:
+                dialog.show(); dialog._preview_icon(); pump(80)
+                centre = dialog.preview_label.mapTo(dialog, dialog.preview_label.rect().center())
+                self.assertLess(dialog.grab().toImage().pixelColor(centre).blue(), 64)
+                pump(260)
+                self.assertTrue(dialog.preview_label.isHidden())
+                self.assertIsNone(dialog.preview_label.movie())
+                self.assertFalse(dialog.preview_timer.isActive())
+                dialog.gif_duration_spin.setValue(.4)
+                dialog._preview_icon(0); pump(200)
+                self.assertFalse(dialog.preview_label.isHidden())
+                pump(280)
+                self.assertTrue(dialog.preview_label.isHidden())
+                self.assertIsNone(dialog.preview_label.movie())
             finally:
                 dialog.close(); parent.close(); dialog.deleteLater(); parent.deleteLater(); pump(30)
 

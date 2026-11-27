@@ -16,7 +16,7 @@ from .flash_diagnostics import record
 from .target_media_controller import (TargetMediaController, foreground_media_target,
                                       default_media_target, activate_media_window)
 from .death_switch_guard import DeathSwitchGuard
-from .kill_icon_config import apply_gif_size_default
+from .kill_icon_config import apply_gif_size_default, gif_max_duration_ms
 from .flash_background import (PreFlashCache, compose_flash_image,
                                image_has_transparency, flash_image_extensions)
 from ..ui.kill_icon_label import KillIconLabel
@@ -88,9 +88,11 @@ class OverlayWindow(QWidget):
         self.kill_icon_label = KillIconLabel(self)
         self.kill_icon_label.hide()
         self.kill_icon_label.failed.connect(self.hide_kill_icon)
+        self.kill_icon_label.finished.connect(self._on_kill_gif_finished)
         self.kill_icon_width = 120
         self.kill_icon_height = 120
         self.kill_icon_bottom = 100
+        self.kill_icon_gif_max_ms = 3000
 
         # 击杀图标视频控件（MP4/WEBM）
         self.kill_video_widget = QVideoWidget(self)
@@ -536,16 +538,25 @@ class OverlayWindow(QWidget):
             self.kill_video_widget.hide()
             self.kill_media_player.stop()
             self.kill_media_player.setSource(QUrl())
-            if not self.kill_icon_label.set_media(path):
+            if not self.kill_icon_label.set_media(path, self.kill_icon_gif_max_ms):
                 self.kill_icon_label.hide()
                 self._check_hide()
                 return
             self.kill_icon_label.show()
             self.kill_icon_fade_in.start()
 
-        # 显示3秒后触发淡出
-        self.kill_icon_timer.start(3000)
+        # GIFs own their natural end and hard limit; static/video retain the
+        # existing three-second display followed by a fade.
+        if self.kill_icon_label.movie() is None:
+            self.kill_icon_timer.start(3000)
         self._sync_media_visibility()
+
+    def _on_kill_gif_finished(self):
+        self.kill_icon_timer.stop()
+        self.kill_icon_fade_in.stop()
+        self.kill_icon_fade_out.stop()
+        self.kill_icon_opacity_effect.setOpacity(0.0)
+        self._check_hide()
 
     def hide_kill_icon(self):
         self.kill_icon_timer.stop()
@@ -682,6 +693,7 @@ class VisualHandler(QObject):
         self.overlay.kill_icon_width = config.get('kill_icon_width', 120)
         self.overlay.kill_icon_height = config.get('kill_icon_height', 120)
         self.overlay.kill_icon_bottom = config.get('kill_icon_bottom', 100)
+        self.overlay.kill_icon_gif_max_ms = gif_max_duration_ms(config)
         if (not self.visual_master_enabled or not self.flash_enabled) and self.is_flashed:
             self.is_flashed = False
             self.signals.update_flash.emit(0)
