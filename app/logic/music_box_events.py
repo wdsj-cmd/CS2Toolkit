@@ -62,6 +62,7 @@ def object_node(value):
 class MusicCue:
     event: str
     started: float
+    round_result: str = ''
 
 
 class MusicEventEngine:
@@ -86,6 +87,7 @@ class MusicEventEngine:
         self.team_selection_done = False
         self.health = None
         self.mvps = None
+        self.mvp_source = ''
         self.bomb_state = ''
         self.local_id = ''
         self.planting_player = ''
@@ -116,8 +118,8 @@ class MusicEventEngine:
         self.current_cue = None
         self.last_update = None
 
-    def _emit(self, event, now):
-        self.current_cue = MusicCue(event, now)
+    def _emit(self, event, now, round_result=''):
+        self.current_cue = MusicCue(event, now, round_result)
         return self.current_cue
 
     def confirm_bomb_visual(self, observed_at):
@@ -153,6 +155,7 @@ class MusicEventEngine:
             self.reset()
         if map_name:
             self.map_name = map_name
+        previous_phase, previous_result, previous_round = self.phase, self.round_result, self.round_number
         round_number = map_info.get('round')
         if round_number is not None and round_number != self.round_number:
             self.round_paused = False
@@ -187,17 +190,37 @@ class MusicEventEngine:
         # takes precedence, including a delayed final MVP counter update.
         if map_info.get('phase') == 'gameover':
             phase = 'over'
+        # Without a local scoreboard while dead, our counter can first return
+        # on respawn. Only that first adjacent preparation packet may catch up.
+        old_round, new_round = number(previous_round), number(round_number)
+        late_result = previous_result if (
+            phase == 'freezetime' and previous_phase == 'over' and previous_result
+            and old_round is not None and new_round in (old_round, old_round + 1)) else ''
         activity = player.get('activity', '')
         provider_id = str(object_node(state.get('provider')).get('steamid') or '')
         if provider_id:
+            if self.local_id and provider_id != self.local_id:
+                self.mvps = None
             self.local_id = provider_id
         player_id = str(player.get('steamid') or '')
-        local = (not provider_id or not player_id or provider_id == player_id)
-        local = local and player.get('spectarget') in (None, 0, '0', -1, '-1', '', provider_id) and activity != 'spectating'
+        local_identity = bool(self.local_id and player_id == self.local_id)
+        local = (not self.local_id or not player_id or local_identity)
+        local = local and player.get('spectarget') in (None, 0, '0', -1, '-1', '', self.local_id) and activity != 'spectating'
         if local and player.get('team') in ('T', 'CT'):
             self.team = player['team']
         health = number(player_state.get('health')) if local else None
-        mvps = number(object_node(player.get('match_stats')).get('mvps')) if local else None
+        # Match statistics belong to their SteamID even when the local player
+        # has a spectator target. Otherwise, use only our own scoreboard entry;
+        # the current spectated player's MVPs must never become our baseline.
+        stats_player = player if local_identity or (not self.local_id and local) else {}
+        mvps = number(object_node(stats_player.get('match_stats')).get('mvps'))
+        self.mvp_source = 'player' if mvps is not None else ''
+        if mvps is None and self.local_id:
+            stats_player = object_node(object_node(state.get('allplayers')).get(self.local_id))
+            mvps = number(object_node(stats_player.get('match_stats')).get('mvps'))
+            self.mvp_source = 'allplayers' if mvps is not None else ''
+        if stats_player.get('team') in ('T', 'CT'):
+            self.team = stats_player['team']
         raw_bomb_state = bomb.get('state', '')
         round_bomb_state = round_info.get('bomb', '')
         bomb_state = raw_bomb_state or round_bomb_state
@@ -302,6 +325,7 @@ class MusicEventEngine:
             self.team = ''
             self.selecting_team = self.team_selection_done = False
             self.health = self.mvps = None
+            self.mvp_source = ''
             self.round_deadline = self.bomb_deadline = None
             self._bomb_pause_seconds = 0
             self.round_clock_source = ''
@@ -318,6 +342,7 @@ class MusicEventEngine:
                 candidates.append('team_select')
             self.phase = ''
             self.health = self.mvps = None
+            self.mvp_source = ''
             self.round_deadline = self.bomb_deadline = None
             self.round_clock_source = ''
             self.bomb_state = ''
@@ -366,7 +391,7 @@ class MusicEventEngine:
                     if not (self.phase == 'over' and self.current_cue and self.current_cue.event == 'mvp'):
                         candidates.append(self.round_result)
             if (mvps is not None and self.mvps is not None and mvps > self.mvps
-                    and phase == 'over'):
+                    and (phase == 'over' or not phase and self.phase == 'over' or late_result)):
                 candidates.append('mvp')
             if health is not None:
                 self.health = health
@@ -427,7 +452,9 @@ class MusicEventEngine:
         # a real main-menu visit, so the next packet cannot stop match music.
         self.activity = 'playing' if activity == 'menu' and not entered_menu else activity
         if candidates:
-            return self._emit(max(candidates, key=PRIORITY.__getitem__), now)
+            event = max(candidates, key=PRIORITY.__getitem__)
+            result = (late_result or self.round_result) if event == 'mvp' else ''
+            return self._emit(event, now, result)
         if bomb_state in ('defused', 'exploded') and self.current_cue and self.current_cue.event.startswith('bomb_'):
             return self._emit('stop', now)
         return None

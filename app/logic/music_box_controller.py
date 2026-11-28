@@ -61,10 +61,12 @@ class MusicBoxController(QObject):
         self._t_bomb_exploded = False
         self._pending_result_cues = []
         self._pending_cue = None
+        self._result_return_cue = None
         self._last_random_clip = {}
         self._bomb_signature = None
         self._bomb_input_signature = None
         self._team_state_signature = None
+        self._mvp_signature = None
         self._pause_watch_signature = None
         self.kit = None
         self.previewing = False
@@ -426,7 +428,17 @@ class MusicBoxController(QObject):
             return
         first = self._last_gsi is None
         self._last_gsi = time.monotonic()
+        # Preserve only whether the old round replaced MVP with its C4 song;
+        # processing the first new preparation packet clears that old scope.
+        old_t_override = self._t_bomb_override_round
+        old_t_exploded = self._t_bomb_exploded
         cue = self.engine.process(state)
+        preparation = None
+        if cue and cue.event == 'mvp' and self.engine.phase == 'freezetime':
+            preparation = MusicCue('freeze_time', cue.started)
+            self.engine.current_cue = preparation
+            if old_t_override and old_t_exploded and old_t_override[0] == self.engine.map_name:
+                cue = preparation
         self._sync_t_bomb_override_round()
         if self._t_bomb_override_round is not None:
             # The round summary can confirm the explosion before a detailed
@@ -447,6 +459,15 @@ class MusicBoxController(QObject):
         self._update_visual_context(state)
         player = object_node(state.get('player'))
         map_info = object_node(state.get('map'))
+        observing_other = bool(self.engine.local_id and player.get('steamid')
+                               and str(player['steamid']) != self.engine.local_id)
+        mvp_signature = (self.engine.mvp_source, self.engine.mvps, observing_other, self.engine.phase)
+        if mvp_signature != self._mvp_signature:
+            self._mvp_signature = mvp_signature
+            self.diagnostic.emit('music_mvp_state', {
+                'source': self.engine.mvp_source or 'unavailable', 'local_mvps': self.engine.mvps,
+                'observing_other': observing_other, 'round_phase': self.engine.phase,
+                'triggered': bool(cue and cue.event == 'mvp')})
         team_state = (self.engine.map_name, map_info.get('phase'), self.engine.phase,
                       player.get('activity'), player.get('team'), self.engine.selecting_team,
                       self.engine.team_selection_done, map_info.get('mode'))
@@ -486,6 +507,10 @@ class MusicBoxController(QObject):
         if (cue and self.enabled and not self.previewing and not self._team_menu_open
                 and not pause_handled and not self._pause_owns_music()):
             self._play_cue(cue)
+            if preparation and cue.event == 'mvp' and self._protected_cue is not None:
+                self._play_cue(preparation)
+            elif preparation and cue.event == 'mvp':
+                self._result_return_cue = preparation
         elif first and self.enabled and not self.previewing:
             self._status('游戏数据已连接，等待音乐事件')
 
@@ -553,6 +578,7 @@ class MusicBoxController(QObject):
         self._t_bomb_exploded = False
         self._pending_result_cues.clear()
         self._pending_cue = None
+        self._result_return_cue = None
 
     def _sync_t_bomb_override_round(self):
         scope = self._t_bomb_override_round
@@ -576,6 +602,8 @@ class MusicBoxController(QObject):
             self._t_bomb_exploded = True
 
     def _play_cue(self, cue, resume=False, repeat=False, round_result=None):
+        if round_result is None and cue.round_result:
+            round_result = cue.round_result
         if cue.event == 'timeout':
             self._clear_playback_protection()
         elif self._pause_owns_music() and not self._team_menu_open:
@@ -741,7 +769,12 @@ class MusicBoxController(QObject):
         self._t_bomb_protected = False
         if self._protected_cue is not None:
             self._protected_cue = None
+        return_cue, self._result_return_cue = self._result_return_cue, None
         if self._play_deferred_cue():
+            return
+        if (return_cue and self.enabled and not self.previewing and not self._team_menu_open
+                and not self._pause_owns_music() and self.engine.current_cue == return_cue):
+            self._play_cue(return_cue)
             return
         if self.previewing:
             self.previewing = False
