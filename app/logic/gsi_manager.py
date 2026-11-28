@@ -2,6 +2,7 @@ import os
 import json
 import threading
 import socket
+import tempfile
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
 from .gsi_sound_handler import GSISoundHandler
@@ -55,6 +56,7 @@ class GSIManager:
         self.data_callback = None
         self.current_port = 3000  # 当前使用的端口
         self.current_host = '127.0.0.1'  # 当前使用的主机
+        self.last_cfg_action = ''
 
         if self.config_manager:
             saved_port = self.config_manager.get("gsi_port", 3000)
@@ -115,18 +117,47 @@ class GSIManager:
         self.cs2_path = path
 
     def create_gsi_cfg(self):
+        self.last_cfg_action = 'error'
         if not self.cs2_path or not os.path.isdir(self.cs2_path):
             return False, "CS2路径未设置或无效。"
         cfg_dir = os.path.join(self.cs2_path, "game", "csgo", "cfg")
         if not os.path.isdir(cfg_dir):
             return False, f"找不到CS2的CFG目录: {cfg_dir}"
         cfg_path = os.path.join(cfg_dir, "gamestate_integration_cs2toolkit.cfg")
+        staging = None
         try:
-            with open(cfg_path, 'w', encoding='utf-8') as f:
-                f.write(self.get_gsi_cfg_content())
-            return True, f"GSI配置文件已成功创建于: {cfg_path}\n使用端口: {self.current_port}"
-        except IOError as e:
+            content = self.get_gsi_cfg_content()
+            action = 'updated'
+            try:
+                with open(cfg_path, encoding='utf-8-sig') as existing:
+                    current = existing.read()
+            except FileNotFoundError:
+                current, action = None, 'created'
+            except UnicodeError:
+                current = None
+            if current is not None and current.strip() == content.strip():
+                self.last_cfg_action = 'unchanged'
+                return True, f"GSI配置已与当前版本一致，无需更新。\n使用端口: {self.current_port}"
+            # Replace only after the new file has been completely written.
+            # A failed write/replace must leave the working configuration intact.
+            with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', newline='\n',
+                    dir=cfg_dir, prefix='cs2toolkit-', suffix='.tmp', delete=False) as output:
+                staging = output.name
+                output.write(content)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(staging, cfg_path)
+            self.last_cfg_action = action
+            label = '创建' if action == 'created' else '更新'
+            return True, f"GSI配置文件已自动{label}于: {cfg_path}\n使用端口: {self.current_port}"
+        except OSError as e:
             return False, f"无法写入GSI配置文件: {e}"
+        finally:
+            if staging and os.path.exists(staging):
+                try:
+                    os.remove(staging)
+                except OSError:
+                    pass
 
     def register_data_callback(self, callback):
         # 注册处理GSI数据的回调函数

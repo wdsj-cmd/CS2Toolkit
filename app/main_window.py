@@ -66,6 +66,7 @@ class CS2Tool(FluentWindow):
 
         self.animation_manager = AnimationManager(self)
         self.gsi_manager = GSIManager(config_manager=self.config_manager)
+        self._gsi_cfg_last_notice = None
         self.visual_handler = VisualHandler(self.config_manager)
         self.music_box = MusicBoxController(self.config_manager, self)
         self.music_box.diagnostic.connect(lambda event, details: record(event, **details))
@@ -441,6 +442,23 @@ class CS2Tool(FluentWindow):
 
         QTimer.singleShot(10, self._perform_steam_detection)
 
+    def _sync_gsi_cfg(self):
+        ok, message = self.gsi_manager.create_gsi_cfg()
+        action = self.gsi_manager.last_cfg_action
+        if action == 'unchanged':
+            return ok, message
+        signature = (self.gsi_manager.cs2_path, self.gsi_manager.current_port, action, message)
+        running = LaunchManager.is_cs2_running() if ok else False
+        if signature != self._gsi_cfg_last_notice:
+            record('gsi_config_sync', action=action, port=self.gsi_manager.current_port,
+                   restart_required=running, **({'error': message} if not ok else {}))
+            if not ok:
+                self.show_warning("GSI配置未更新", message, duration=10000)
+            elif running:
+                self.show_warning("GSI配置已自动更新", "已同步当前版本的 GSI 配置。CS2 正在运行，请重启游戏以加载新配置。", duration=10000)
+            self._gsi_cfg_last_notice = signature
+        return ok, message
+
     def _perform_steam_detection(self):
         # 优先使用配置中保存的路径
         saved_steam_path = self.config_manager.get("steam_path")
@@ -448,9 +466,9 @@ class CS2Tool(FluentWindow):
             self.steam_path = saved_steam_path
             self.update_home_status()
 
-            # 如果是优先从配置加载的，也要顺便给 GSI 生成一次配置，防止用户重装了游戏但路径没变
+            # Compare against the current template even when reusing a saved path.
             self.gsi_manager.set_cs2_path(self.steam_path)
-            self.gsi_manager.create_gsi_cfg()
+            self._sync_gsi_cfg()
             self._repair_current_font_if_needed(silent=True)
             return
 
@@ -462,7 +480,7 @@ class CS2Tool(FluentWindow):
 
             # 检测到新路径后自动生成配置
             self.gsi_manager.set_cs2_path(self.steam_path)
-            self.gsi_manager.create_gsi_cfg()
+            self._sync_gsi_cfg()
             self._repair_current_font_if_needed(silent=True)
 
             self.update_recent_activity("自动检测CS2路径成功")
@@ -483,7 +501,7 @@ class CS2Tool(FluentWindow):
 
                 # 手动选择后也自动生成一次
                 self.gsi_manager.set_cs2_path(self.steam_path)
-                self.gsi_manager.create_gsi_cfg()
+                self._sync_gsi_cfg()
                 self._repair_current_font_if_needed(silent=True)
 
                 self.update_recent_activity(f"手动设置CS2路径为: {path}")
@@ -610,9 +628,7 @@ class CS2Tool(FluentWindow):
             # Always write the port that was actually bound, rather than leaving
             # CS2 posting to the old listener.
             if self.gsi_manager.cs2_path:
-                cfg_ok, cfg_message = self.gsi_manager.create_gsi_cfg()
-                if not cfg_ok:
-                    self.show_warning("GSI配置未更新", cfg_message, duration=10000)
+                self._sync_gsi_cfg()
             if hasattr(self, 'home_tab'):
                 self.home_tab.status_gsi_server.setText(f"服务运行中...")
                 self.home_tab.status_gsi_server.setStyleSheet("color: green;")
