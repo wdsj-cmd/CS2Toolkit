@@ -1,8 +1,20 @@
 import os
+from ...logic.flash_background import flash_image_extensions
+from ...logic.kill_icon_config import apply_gif_size_default, gif_max_duration_ms
+from ..kill_icon_label import KillIconLabel
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFileDialog, QColorDialog
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer, QSize, QPropertyAnimation, QSignalBlocker
 from qfluentwidgets import (ScrollArea, SettingCardGroup, SwitchSettingCard, SettingCard,
-                           PushSettingCard, PushButton, FluentIcon as FIF, LineEdit, MessageBoxBase, SubtitleLabel, BodyLabel, SwitchButton, Slider)
+                           PushSettingCard, PushButton, FluentIcon as FIF, LineEdit, MessageBoxBase, SubtitleLabel, BodyLabel, SwitchButton, Slider, InfoBar, DoubleSpinBox)
+
+
+def _web_only_targets(config_manager, visual_config):
+    if visual_config.get('boss_key_target_type', 'url') != 'url':
+        visual_config.update(boss_key_target_type='url', boss_key_target='',
+                             boss_key_url='', boss_key_enabled=False)
+        config_manager.set('visual', visual_config)
+    return visual_config
+
 
 class VisualSettingCard(SettingCard):
     def __init__(self, icon, title, content=None, parent=None):
@@ -23,7 +35,7 @@ class VisualConfigDialog(MessageBoxBase):
         super().__init__(parent)
         self.config_manager = config_manager
         self.dialog_type = dialog_type # 'flash', 'death', 'boss_key'
-        self.visual_config = self.config_manager.get('visual', {})
+        self.visual_config = _web_only_targets(config_manager, config_manager.get('visual', {}))
         self._setup_ui()
 
     def _setup_ui(self):
@@ -68,6 +80,30 @@ class VisualConfigDialog(MessageBoxBase):
             self.scale_combo.currentIndexChanged.connect(self._on_flash_scale_changed)
             scale_layout.addWidget(self.scale_combo, 1)
             self.viewLayout.addLayout(scale_layout)
+
+            background_layout = QHBoxLayout()
+            background_layout.addWidget(BodyLabel("半透明图片显示原画面:"))
+            self.flash_background_switch = SwitchButton(self)
+            self.flash_background_switch.setOnText("开")
+            self.flash_background_switch.setOffText("关")
+            self.flash_background_switch.setChecked(self.visual_config.get('flash_freeze_background_enabled', True))
+            self.flash_background_switch.checkedChanged.connect(self._on_flash_background_changed)
+            background_layout.addStretch()
+            background_layout.addWidget(self.flash_background_switch)
+            self.viewLayout.addLayout(background_layout)
+            background_hint = BodyLabel("开启：透明区域显示闪光前的静止画面；关闭：普通透明叠加。")
+            background_hint.setWordWrap(True)
+            self.viewLayout.addWidget(background_hint)
+
+            capture_layout = QHBoxLayout()
+            capture_layout.addWidget(BodyLabel("原画面捕获:"))
+            self.capture_combo = ComboBox(self)
+            self.capture_combo.addItems(["低占用（6 帧/秒）", "兼容（12 帧/秒，占用较高）"])
+            self.capture_combo.setCurrentIndex(1 if self.visual_config.get('flash_capture_mode') == 'compat' else 0)
+            self.capture_combo.currentIndexChanged.connect(self._on_capture_mode_changed)
+            capture_layout.addWidget(self.capture_combo, 1)
+            self.viewLayout.addLayout(capture_layout)
+            self.viewLayout.addWidget(BodyLabel("原画面异常时可切换兼容模式。"))
 
             reduce_layout = QHBoxLayout()
             reduce_layout.addWidget(BodyLabel("闪光弹降噪:"))
@@ -136,23 +172,18 @@ class VisualConfigDialog(MessageBoxBase):
             type_layout.addWidget(BodyLabel("打开类型:"))
             from qfluentwidgets import SpinBox, ComboBox
             self.target_type_combo = ComboBox(self)
-            self.target_type_combo.addItems(["网页", "本地程序"])
-            current_target_type = self.visual_config.get('boss_key_target_type', 'url')
-            self.target_type_combo.setCurrentIndex(1 if current_target_type == 'app' else 0)
-            self.target_type_combo.currentIndexChanged.connect(self._on_target_type_changed)
+            self.target_type_combo.addItem("网页")
             type_layout.addWidget(self.target_type_combo, 1)
             self.viewLayout.addLayout(type_layout)
 
             target_layout = QHBoxLayout()
             target_layout.addWidget(BodyLabel("目标内容:"))
             self.target_input = LineEdit(self)
+            self.target_input.setPlaceholderText('输入要打开的网页地址')
             default_target = self.visual_config.get('boss_key_target', self.visual_config.get('boss_key_url', 'https://www.douyin.com/?recommend=1&from_nav=1'))
             self.target_input.setText(default_target)
             self.target_input.textChanged.connect(self._on_target_changed)
             target_layout.addWidget(self.target_input, 1)
-            self.target_browse_btn = PushButton("选择程序", self)
-            self.target_browse_btn.clicked.connect(self._browse_boss_key_target)
-            target_layout.addWidget(self.target_browse_btn)
             self.viewLayout.addLayout(target_layout)
 
             delay_layout = QHBoxLayout()
@@ -167,7 +198,7 @@ class VisualConfigDialog(MessageBoxBase):
             action_layout = QHBoxLayout()
             action_layout.addWidget(BodyLabel("新回合动作:"))
             self.action_combo = ComboBox(self)
-            self.action_combo.addItems(["无操作 (仅切回游戏)", "关闭浏览器进程 (强制关闭浏览器)", "暂停/播放(推荐视频网站,使用时关闭音乐软件)"])
+            self.action_combo.addItems(["无操作 (仅切回游戏)", "关闭浏览器进程 (强制关闭浏览器)", "定向暂停/播放目标媒体"])
 
             action_val = self.visual_config.get('boss_key_action', 'none')
             if action_val == 'none':
@@ -180,16 +211,50 @@ class VisualConfigDialog(MessageBoxBase):
             self.action_combo.currentIndexChanged.connect(self._on_action_changed)
             action_layout.addWidget(self.action_combo, 1)
             self.viewLayout.addLayout(action_layout)
-            self._update_boss_key_target_ui()
+            guard_hint = BodyLabel("热身阶段、死斗、军备竞赛、回合结束或确认队友全灭时不切屏；数据不足时短暂等待后正常切屏。切回游戏后会继续暂停目标网页的延迟播放。")
+            guard_hint.setWordWrap(True)
+            self.viewLayout.addWidget(guard_hint)
+            extension_hint = BodyLabel('安装扩展，获得更稳定的网页切换和播放/暂停体验。未连接扩展时自动使用系统媒体控制。', self)
+            extension_hint.setWordWrap(True)
+            self.viewLayout.addWidget(extension_hint)
+            self.extension_install_button = PushButton('安装浏览器扩展', self)
+            self.extension_install_button.clicked.connect(self._install_browser_extension)
+            self.viewLayout.addWidget(self.extension_install_button)
+            self.extension_status = BodyLabel(self)
+            self.extension_status.setWordWrap(True)
+            self.viewLayout.addWidget(self.extension_status)
+            bridge = getattr(self.config_manager, 'browser_bridge', None)
+            self.extension_install_button.setEnabled(bridge is not None)
+            if bridge is not None:
+                bridge.changed.connect(self._update_extension_status)
+            self._update_extension_status()
 
         self.widget.setMinimumWidth(400)
 
+    def _update_extension_status(self):
+        bridge = getattr(self.config_manager, 'browser_bridge', None)
+        self.extension_status.setText(bridge.description() if bridge is not None else '扩展未连接，使用系统媒体控制')
+
+    def _install_browser_extension(self):
+        bridge = getattr(self.config_manager, 'browser_bridge', None)
+        if bridge is not None:
+            bridge.install(self)
+
     def _browse_flash_image(self):
-        path, _ = QFileDialog.getOpenFileName(self, "选择图片", "", "图片文件 (*.png *.jpg *.jpeg *.bmp)")
+        extensions = ' '.join('*' + ext for ext in sorted(flash_image_extensions()))
+        path, _ = QFileDialog.getOpenFileName(self, "选择图片", "", f"图片文件 ({extensions})")
         if path:
             self.visual_config['flash_path'] = path
             self.path_label.setText(os.path.basename(path))
             self.config_manager.set('visual', self.visual_config)
+
+    def _on_flash_background_changed(self, checked):
+        self.visual_config['flash_freeze_background_enabled'] = checked
+        self.config_manager.set('visual', self.visual_config)
+
+    def _on_capture_mode_changed(self, index):
+        self.visual_config['flash_capture_mode'] = 'compat' if index == 1 else 'low'
+        self.config_manager.set('visual', self.visual_config)
 
     def _browse_flash_dir(self):
         path = QFileDialog.getExistingDirectory(self, "选择图片文件夹")
@@ -209,6 +274,9 @@ class VisualConfigDialog(MessageBoxBase):
         self.visual_config['boss_key_target'] = text
         self.visual_config['boss_key_url'] = text
         self.config_manager.set('visual', self.visual_config)
+        bridge = getattr(self.config_manager, 'browser_bridge', None)
+        if bridge is not None:
+            bridge.configure_url(text)
 
     def _on_delay_changed(self, value):
         self.visual_config['boss_key_delay'] = value
@@ -223,38 +291,6 @@ class VisualConfigDialog(MessageBoxBase):
             val = 'pause'
         self.visual_config['boss_key_action'] = val
         self.config_manager.set('visual', self.visual_config)
-
-    def _on_target_type_changed(self, index):
-        self.visual_config['boss_key_target_type'] = 'app' if index == 1 else 'url'
-        self.config_manager.set('visual', self.visual_config)
-        self._update_boss_key_target_ui()
-
-    def _browse_boss_key_target(self):
-        path, _ = QFileDialog.getOpenFileName(self, "选择本地程序", "", "程序或快捷方式 (*.exe *.lnk *.bat *.cmd)")
-        if path:
-            self.target_input.setText(path)
-
-    def _update_boss_key_target_ui(self):
-        is_app = self.visual_config.get('boss_key_target_type', 'url') == 'app'
-        self.target_browse_btn.setVisible(is_app)
-
-        self.action_combo.blockSignals(True)
-        self.action_combo.clear()
-        if is_app:
-            self.action_combo.addItems(["无操作 (仅切回游戏)", "强制关闭目标程序进程", "暂停/播放媒体 (如系统音乐/视频)"])
-        else:
-            self.action_combo.addItems(["无操作 (仅切回游戏)", "关闭浏览器进程 (强制关闭浏览器)", "暂停/播放(推荐视频网站,使用时关闭音乐软件)"])
-
-        action_val = self.visual_config.get('boss_key_action', 'none')
-        if action_val == 'none':
-            idx = 0
-        elif action_val == 'close':
-            idx = 1
-        else:
-            idx = 2
-        self.action_combo.setCurrentIndex(idx)
-        self.action_combo.blockSignals(False)
-        self.action_combo.setEnabled(True)
 
     def _on_flash_audio_switch_changed(self, checked):
         self.visual_config['flash_reduce_volume_enabled'] = checked
@@ -290,6 +326,12 @@ class KillIconDialog(MessageBoxBase):
         super().__init__(parent)
         self.config_manager = config_manager
         self.visual_config = self.config_manager.get('visual', {})
+        icons = self.visual_config.get('kill_icons_1_5', [])
+        icons = icons if isinstance(icons, list) else []
+        self.visual_config['kill_icons_1_5'] = [dict(icons[i]) if i < len(icons) and isinstance(icons[i], dict)
+                                               else {} for i in range(5)]
+        if apply_gif_size_default(self.visual_config):
+            self.config_manager.set('visual', self.visual_config)
         self._setup_ui()
 
     def _setup_ui(self):
@@ -310,9 +352,12 @@ class KillIconDialog(MessageBoxBase):
         self.path_label.setStyleSheet("color: #666666;")
         selection_layout.addWidget(self.path_label, 1)
 
-        self.select_btn = PushButton("选择图片", self)
+        self.select_btn = PushButton("选择素材", self)
         self.select_btn.clicked.connect(self._browse_basic_image)
         selection_layout.addWidget(self.select_btn)
+        self.preview_btn = PushButton("预览", self)
+        self.preview_btn.clicked.connect(lambda: self._preview_icon())
+        selection_layout.addWidget(self.preview_btn)
         basic_layout.addLayout(selection_layout)
 
         # 高级设置开关
@@ -369,6 +414,18 @@ class KillIconDialog(MessageBoxBase):
         bottom_layout.addWidget(self.bottom_value_label)
         basic_layout.addLayout(bottom_layout)
 
+        duration_layout = QHBoxLayout()
+        duration_layout.addWidget(BodyLabel("GIF 最长播放时间:"))
+        self.gif_duration_spin = DoubleSpinBox(self)
+        self.gif_duration_spin.setRange(.1, 30)
+        self.gif_duration_spin.setDecimals(1)
+        self.gif_duration_spin.setSingleStep(.1)
+        self.gif_duration_spin.setSuffix(" 秒")
+        self.gif_duration_spin.setValue(gif_max_duration_ms(self.visual_config)/1000)
+        self.gif_duration_spin.valueChanged.connect(self._on_gif_duration_changed)
+        duration_layout.addWidget(self.gif_duration_spin, 1)
+        basic_layout.addLayout(duration_layout)
+
         self.viewLayout.addWidget(self.basic_container)
 
         # 高级设置容器
@@ -388,12 +445,30 @@ class KillIconDialog(MessageBoxBase):
             self.adv_labels.append(label)
             h_layout.addWidget(label, 1)
 
-            btn = PushButton("选择图片", self)
+            btn = PushButton("选择素材", self)
             btn.clicked.connect(lambda checked=False, idx=i: self._browse_adv_image(idx))
             h_layout.addWidget(btn)
+            preview_btn = PushButton("预览", self)
+            preview_btn.clicked.connect(lambda checked=False, idx=i: self._preview_icon(idx))
+            h_layout.addWidget(preview_btn)
             adv_layout.addLayout(h_layout)
 
         self.viewLayout.addWidget(self.adv_container)
+
+        self.viewLayout.addWidget(BodyLabel("GIF 只播放一次，播完或达到上限后立即消失。", self))
+        self.preview_label = KillIconLabel(self)
+        self.preview_label.hide()
+        self.viewLayout.addWidget(self.preview_label, 0, Qt.AlignHCenter)
+        self.preview_fade = QPropertyAnimation(self.preview_label, b'mediaOpacity', self)
+        self.preview_fade.setDuration(500)
+        self.preview_fade.setStartValue(1.0)
+        self.preview_fade.setEndValue(0.0)
+        self.preview_fade.finished.connect(self._clear_preview)
+        self.preview_timer = QTimer(self)
+        self.preview_timer.setSingleShot(True)
+        self.preview_timer.timeout.connect(self.preview_fade.start)
+        self.preview_label.failed.connect(self._clear_preview)
+        self.preview_label.finished.connect(self._clear_preview)
 
         self._update_visibility()
         self.widget.setMinimumWidth(450)
@@ -401,25 +476,33 @@ class KillIconDialog(MessageBoxBase):
     def _update_visibility(self):
         if self.is_advanced:
             self.adv_container.show()
-            self.basic_container.findChild(QHBoxLayout).setEnabled(False) # 只是视觉上，实际用 hide 更简单但影响布局
         else:
             self.adv_container.hide()
 
     def _on_advanced_toggled(self, checked):
         self.is_advanced = checked
         self.visual_config['kill_icon_is_advanced'] = checked
+        self._set_gif_default_size()
         self._update_visibility()
         self.config_manager.set('visual', self.visual_config)
 
     def _on_width_changed(self, value):
         self.width_value_label.setText(f"{value} px")
         self.visual_config['kill_icon_width'] = value
+        self.visual_config['kill_icon_size_customized'] = True
+        self.config_manager.set('visual', self.visual_config)
+        self._resize_preview()
+
+    def _on_gif_duration_changed(self, value):
+        self.visual_config['kill_icon_gif_max_seconds'] = value
         self.config_manager.set('visual', self.visual_config)
 
     def _on_height_changed(self, value):
         self.height_value_label.setText(f"{value} px")
         self.visual_config['kill_icon_height'] = value
+        self.visual_config['kill_icon_size_customized'] = True
         self.config_manager.set('visual', self.visual_config)
+        self._resize_preview()
 
     def _on_bottom_changed(self, value):
         self.bottom_value_label.setText(f"{value} px")
@@ -430,6 +513,7 @@ class KillIconDialog(MessageBoxBase):
         path, _ = QFileDialog.getOpenFileName(self, "选择击杀图标", "", "媒体文件 (*.png *.jpg *.jpeg *.bmp *.gif *.mp4 *.webm)")
         if path:
             self.visual_config['kill_icon_path'] = path
+            self._set_gif_default_size(path)
             self.path_label.setText(os.path.basename(path))
             self.config_manager.set('visual', self.visual_config)
 
@@ -439,8 +523,47 @@ class KillIconDialog(MessageBoxBase):
             icons = self.visual_config.get('kill_icons_1_5', [{} for _ in range(5)])
             icons[index]['path'] = path
             self.visual_config['kill_icons_1_5'] = icons
+            self._set_gif_default_size(path)
             self.adv_labels[index].setText(os.path.basename(path))
             self.config_manager.set('visual', self.visual_config)
+
+    def _set_gif_default_size(self, path=None):
+        if apply_gif_size_default(self.visual_config, path):
+            with QSignalBlocker(self.width_slider), QSignalBlocker(self.height_slider):
+                self.width_slider.setValue(320)
+                self.height_slider.setValue(320)
+            self.width_value_label.setText('320 px')
+            self.height_value_label.setText('320 px')
+            self._resize_preview()
+
+    def _resize_preview(self):
+        if hasattr(self, 'preview_label'):
+            size = QSize(self.width_slider.value(), self.height_slider.value())
+            self.preview_label.setFixedSize(size.scaled(QSize(240, 160), Qt.KeepAspectRatio))
+
+    def _preview_icon(self, index=None):
+        self._clear_preview()
+        path = (self.visual_config.get('kill_icon_path', '') if index is None
+                else self.visual_config['kill_icons_1_5'][index].get('path', ''))
+        self._resize_preview()
+        if not self.preview_label.set_media(path, gif_max_duration_ms(self.visual_config)):
+            InfoBar.warning("无法预览", "请选择可读取的静态图片或 GIF；视频请在游戏内查看。", parent=self)
+            return
+        self.preview_label.mediaOpacity = 1.0
+        self.preview_label.show()
+        if self.preview_label.movie() is None:
+            self.preview_timer.start(3000)
+
+    def _clear_preview(self):
+        self.preview_timer.stop()
+        self.preview_fade.stop()
+        self.preview_label.hide()
+        self.preview_label.clear_media()
+
+    def hideEvent(self, event):
+        if hasattr(self, 'preview_timer'):
+            self._clear_preview()
+        super().hideEvent(event)
 
 class VisualPage(ScrollArea):
     def __init__(self, config_manager, parent=None):
@@ -464,11 +587,12 @@ class VisualPage(ScrollArea):
         self._setup_ui()
 
     def _init_config(self):
-        self.visual_config = self.config_manager.get('visual', {
+        self.visual_config = _web_only_targets(self.config_manager, self.config_manager.get('visual', {
             'visual_master_enabled': True,
             'flash_enabled': False,
             'flash_path': '',
             'flash_scale_mode': 'stretch',
+            'flash_freeze_background_enabled': True,
             'flash_reduce_volume_enabled': False,
             'flash_reduce_volume_percent': 25,
             'death_media_enabled': False,
@@ -487,7 +611,7 @@ class VisualPage(ScrollArea):
             'kill_icon_bottom': 100,
             'kill_icon_path': '',
             'kill_icons_1_5': [{} for _ in range(5)]
-        })
+        }))
 
     def _update_ui_from_config(self):
         self._init_config()
@@ -510,6 +634,9 @@ class VisualPage(ScrollArea):
         self.fullscreen_support_card.switchButton.blockSignals(True)
         self.fullscreen_support_card.switchButton.setChecked(self.config_manager.get('launch_use_vulkan', False))
         self.fullscreen_support_card.switchButton.blockSignals(False)
+        self.borderless_card.switchButton.blockSignals(True)
+        self.borderless_card.switchButton.setChecked(self.config_manager.get('launch_borderless', True))
+        self.borderless_card.switchButton.blockSignals(False)
 
     def _save_config(self):
         self.config_manager.set('visual', self.visual_config)
@@ -528,6 +655,22 @@ class VisualPage(ScrollArea):
         self.flash_card.switch_btn.checkedChanged.connect(self._on_flash_switch_changed)
         self.flash_card.setting_btn.clicked.connect(lambda: self._open_settings('flash'))
         self.practical_group.addSettingCard(self.flash_card)
+
+        self.flash_test_card = PushSettingCard(
+            text="预览闪光（2.5 秒）", icon=FIF.PHOTO,
+            title="测试图片显示", content="先在桌面预览，再进入游戏检查闪光联动",
+            parent=self.practical_group)
+        self.flash_test_card.clicked.connect(self._preview_flash)
+        self.practical_group.addSettingCard(self.flash_test_card)
+
+        self.borderless_card = SwitchSettingCard(
+            icon=FIF.GAME, title="无边框窗口兼容模式",
+            content="通过工具启动游戏时附加 -windowed -noborder；更改后需重启游戏",
+            parent=self.practical_group)
+        self.borderless_card.switchButton.setChecked(self.config_manager.get('launch_borderless', True))
+        self.borderless_card.switchButton.checkedChanged.connect(
+            lambda checked: self.config_manager.set('launch_borderless', checked))
+        self.practical_group.addSettingCard(self.borderless_card)
 
         self.fullscreen_support_card = SwitchSettingCard(
             icon=FIF.GAME,
@@ -552,6 +695,14 @@ class VisualPage(ScrollArea):
         self.practical_group.addSettingCard(self.kill_icon_card)
 
         self.layout.addWidget(self.practical_group)
+
+        self.flash_status_label = BodyLabel(self.view)
+        self.flash_status_label.setWordWrap(True)
+        self.layout.addWidget(self.flash_status_label)
+        self.status_timer = QTimer(self)
+        self.status_timer.timeout.connect(self._refresh_flash_status)
+        self.status_timer.start(500)
+        self._refresh_flash_status()
 
         self.entertainment_group = SettingCardGroup("娱乐功能", self.view)
 
@@ -587,6 +738,21 @@ class VisualPage(ScrollArea):
         else:
             dialog = VisualConfigDialog(self.config_manager, type, self)
         dialog.exec()
+        if type == 'boss_key':
+            self._update_ui_from_config()
+
+    def _refresh_flash_status(self):
+        handler = getattr(self.parent_window, 'visual_handler', None)
+        if handler:
+            self.flash_status_label.setText(handler.flash_status())
+
+    def _preview_flash(self):
+        handler = getattr(self.parent_window, 'visual_handler', None)
+        if not handler:
+            return
+        handler._update_config(force=True)
+        if not handler.overlay.preview_flash():
+            InfoBar.warning("无法预览", "请先在闪光设置中选择可读取的图片或图片文件夹。", parent=self)
 
     def _on_flash_switch_changed(self, is_checked):
         self.visual_config['flash_enabled'] = is_checked

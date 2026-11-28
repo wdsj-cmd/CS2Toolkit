@@ -5,6 +5,14 @@ from PySide6.QtGui import QPixmap, QIcon
 from qfluentwidgets import StrongBodyLabel, BodyLabel, PushButton
 
 
+REALTIME_EVENT_ITEMS = (
+    '--- 全局音效 ---', '全局击杀', '--- 其他音效 ---',
+    '切换到', '换弹', '使用武器击杀', '道具投出',
+)
+REALTIME_EVENT_MAPPING = {1: 'kill', 3: 'active', 4: 'reloading', 5: 'weapon_kill', 6: 'grenade_thrown'}
+RETIRED_REALTIME_EVENTS = frozenset(('bomb_planted', 'bomb_defused', 'player_death'))
+
+
 class ActionCard(QWidget):
     def __init__(self, icon, title, description, callback, parent=None):
         super().__init__(parent)
@@ -201,19 +209,7 @@ class EventConfigWidget(QWidget):
         self.weapon_name_input.setCompleter(completer)
         
         self.event_type_combo = ComboBox()
-        event_items = [
-            "--- 全局音效 ---",
-            "全局击杀",
-            "C4安装", 
-            "C4拆除",
-            "玩家死亡",
-            "--- 其他音效 ---",
-            "切换到",
-            "换弹", 
-            "使用武器击杀",
-            "道具投出"
-        ]
-        self.event_type_combo.addItems(event_items)
+        self.event_type_combo.addItems(REALTIME_EVENT_ITEMS)
         self.event_type_combo.setCurrentIndex(1)  # 默认选择"全局击杀"
         self.event_type_combo.currentIndexChanged.connect(self._on_event_type_changed)
         
@@ -303,7 +299,7 @@ class EventConfigWidget(QWidget):
     def _on_event_type_changed(self, index):
         # 当事件类型改变时调用
         # 防止选择分类标题
-        if index in [0, 5]:  # 分类标题索引
+        if index in [0, 2]:  # 分类标题索引
             # 如果选择了分类标题，跳转到下一个有效选项
             if index == 0:  # 全局音效分类
                 # 阻止信号触发，避免递归调用
@@ -312,27 +308,27 @@ class EventConfigWidget(QWidget):
                 self.event_type_combo.blockSignals(False)
                 # 手动调用更新逻辑
                 index = 1
-            elif index == 5:  # 其他音效分类
+            elif index == 2:  # 其他音效分类
                 # 阻止信号触发，避免递归调用
                 self.event_type_combo.blockSignals(True)
-                self.event_type_combo.setCurrentIndex(6)  # 跳转到"切换到"
+                self.event_type_combo.setCurrentIndex(3)  # 跳转到"切换到"
                 self.event_type_combo.blockSignals(False)
                 # 手动调用更新逻辑
-                index = 6
+                index = 3
         
-        if index in [1, 2, 3, 4]:  # 全局击杀、C4安装、C4拆除、玩家死亡（全局事件）
+        if index == 1:  # 全局击杀（全局事件）
             # 对于全局事件，设置武器名称为固定值并隐藏
             self.weapon_name_input.setCurrentText("全局事件")
             self.when_label.hide()
             self.weapon_name_input.hide()
-        elif index == 8:  # 使用武器击杀
+        elif index == 5:  # 使用武器击杀
             # 对于使用武器击杀事件，启用武器名称输入
             self.when_label.show()
             self.weapon_name_input.show()
             self.weapon_name_input.setEnabled(True)
             if self.weapon_name_input.currentText() == "全局事件":
                 self.weapon_name_input.setCurrentText("")
-        elif index == 9:  # 道具投出
+        elif index == 6:  # 道具投出
             self.when_label.show()
             self.weapon_name_input.show()
             self.weapon_name_input.setEnabled(True)
@@ -353,7 +349,7 @@ class EventConfigWidget(QWidget):
     def _update_ui_state_for_event_type(self, index):
         # 更新UI状态但不触发回调（用于set_config）
         # 防止选择分类标题
-        if index in [0, 5]:  # 分类标题索引
+        if index in [0, 2]:  # 分类标题索引
             # 如果选择了分类标题，跳转到下一个有效选项
             if index == 0:  # 全局音效分类
                 # 阻止信号触发，避免递归调用
@@ -361,26 +357,26 @@ class EventConfigWidget(QWidget):
                 self.event_type_combo.setCurrentIndex(1)  # 跳转到"全局击杀"
                 self.event_type_combo.blockSignals(False)
                 index = 1
-            elif index == 5:  # 其他音效分类
+            elif index == 2:  # 其他音效分类
                 # 阻止信号触发，避免递归调用
                 self.event_type_combo.blockSignals(True)
-                self.event_type_combo.setCurrentIndex(6)  # 跳转到"切换到"
+                self.event_type_combo.setCurrentIndex(3)  # 跳转到"切换到"
                 self.event_type_combo.blockSignals(False)
-                index = 6
+                index = 3
         
-        if index in [1, 2, 3, 4]:  # 全局击杀、C4安装、C4拆除、玩家死亡（全局事件）
+        if index == 1:  # 全局击杀（全局事件）
             # 对于全局事件，设置武器名称为固定值并隐藏
             self.weapon_name_input.setCurrentText("全局事件")
             self.when_label.hide()
             self.weapon_name_input.hide()
-        elif index == 8:  # 使用武器击杀
+        elif index == 5:  # 使用武器击杀
             # 对于使用武器击杀事件，显示武器名称输入
             self.when_label.show()
             self.weapon_name_input.show()
             self.weapon_name_input.setEnabled(True)
             if self.weapon_name_input.currentText() == "全局事件":
                 self.weapon_name_input.setCurrentText("")
-        elif index == 9:  # 道具投出
+        elif index == 6:  # 道具投出
             self.when_label.show()
             self.weapon_name_input.show()
             self.weapon_name_input.setEnabled(True)
@@ -402,19 +398,10 @@ class EventConfigWidget(QWidget):
         weapon_name = self.weapon_cn_to_en.get(weapon_name_cn, weapon_name_cn)
         event_index = self.event_type_combo.currentIndex()
         # 修正事件类型索引映射，对应下拉框的实际索引
-        event_mapping = {
-            1: "kill",           # 全局击杀
-            2: "bomb_planted",   # C4安装
-            3: "bomb_defused",   # C4拆除
-            4: "player_death",   # 玩家死亡
-            6: "active",         # 切换到
-            7: "reloading",      # 换弹
-            8: "weapon_kill",    # 使用武器击杀
-            9: "grenade_thrown"  # 道具投出
-        }
+        event_mapping = REALTIME_EVENT_MAPPING
         
         # 强制为全局事件设置武器名称，防止意外覆盖
-        if event_index in [1, 2, 3, 4]:
+        if event_index == 1:
             weapon_name = "全局事件"
             
         config = {
@@ -431,6 +418,8 @@ class EventConfigWidget(QWidget):
         return config
 
     def set_config(self, config):
+        if config.get('event') in RETIRED_REALTIME_EVENTS:
+            raise ValueError('该实时音效事件已移除')
         # 设置此小部件的配置
         # 临时禁用回调，避免在设置配置时触发保存
         original_callback = self.on_change
@@ -450,16 +439,7 @@ class EventConfigWidget(QWidget):
                     self.weapon_name_input.setCurrentText(weapon_name_cn)
             
             event_type = config.get("event", "active")
-            event_index_mapping = {
-                "kill": 1,           # 全局击杀
-                "bomb_planted": 2,   # C4安装
-                "bomb_defused": 3,   # C4拆除
-                "player_death": 4,   # 玩家死亡
-                "active": 6,         # 切换到
-                "reloading": 7,      # 换弹
-                "weapon_kill": 8,    # 使用武器击杀
-                "grenade_thrown": 9  # 道具投出
-            }
+            event_index_mapping = {event: index for index, event in REALTIME_EVENT_MAPPING.items()}
             event_index = event_index_mapping.get(event_type, 1)  # 默认选择"全局击杀"
             # 阻止信号触发，避免在设置配置时触发_on_event_type_changed
             self.event_type_combo.blockSignals(True)

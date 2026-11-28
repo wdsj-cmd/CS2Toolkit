@@ -5,6 +5,7 @@ from qfluentwidgets import (
     PushButton, Slider, MessageBox, CheckBox, EditableComboBox, MessageBoxBase
 )
 import os
+from .components import REALTIME_EVENT_ITEMS, REALTIME_EVENT_MAPPING, RETIRED_REALTIME_EVENTS
 
 
 
@@ -34,19 +35,7 @@ class AddEventDialog(MessageBoxBase):
         # 事件类型选择
         self.event_type_combo = ComboBox()
         # 分类添加事件类型
-        event_items = [
-            "--- 全局音效 ---",
-            "全局击杀",
-            "C4安装", 
-            "C4拆除",
-            "玩家死亡",
-            "--- 其他音效 ---",
-            "切换到",
-            "换弹", 
-            "使用武器击杀",
-            "道具投出"
-        ]
-        self.event_type_combo.addItems(event_items)
+        self.event_type_combo.addItems(REALTIME_EVENT_ITEMS)
         self.event_type_combo.currentIndexChanged.connect(self._on_event_type_changed)
         form_layout.addRow(BodyLabel("事件类型:"), self.event_type_combo)
         
@@ -234,7 +223,7 @@ class AddEventDialog(MessageBoxBase):
     def _on_event_type_changed(self, index):
         # 当事件类型改变时调用
         # 防止选择分类标题
-        if index in [0, 5]:  # 分类标题索引
+        if index in [0, 2]:  # 分类标题索引
             # 如果选择了分类标题，跳转到下一个有效选项
             if index == 0:  # 全局音效分类
                 # 阻止信号触发，避免递归调用
@@ -243,13 +232,13 @@ class AddEventDialog(MessageBoxBase):
                 self.event_type_combo.blockSignals(False)
                 # 手动调用更新逻辑
                 index = 1
-            elif index == 5:  # 其他音效分类
+            elif index == 2:  # 其他音效分类
                 # 阻止信号触发，避免递归调用
                 self.event_type_combo.blockSignals(True)
-                self.event_type_combo.setCurrentIndex(6)  # 跳转到"切换到"
+                self.event_type_combo.setCurrentIndex(3)  # 跳转到"切换到"
                 self.event_type_combo.blockSignals(False)
                 # 手动调用更新逻辑
-                index = 6
+                index = 3
         
 
 
@@ -259,27 +248,30 @@ class AddEventDialog(MessageBoxBase):
     def _update_ui_state_for_event_type(self, index):
         # 根据事件类型索引更新UI控件状态
         # 只有击杀类事件显示连杀配置选项
-        if index in [1, 8]: # 1:全局击杀 8:使用武器击杀
+        if index in [1, 5]: # 1:全局击杀 5:使用武器击杀
             self.advanced_checkbox.show()
         else:
             self.advanced_checkbox.hide()
             self.advanced_checkbox.setChecked(False)
             
-        if index in [1, 2, 3, 4]:  # 全局击杀、C4安装、C4拆除、玩家死亡（全局事件）
+        if index == 1:  # 全局击杀（全局事件）
             self.weapon_name_input.setCurrentText("全局事件")
             self.weapon_name_label.hide()
             self.weapon_name_input.hide()
             self.browse_sound_btn.setEnabled(True)
             self.sound_path_input.setEnabled(True)
-        elif index == 9: # 道具投出
+        elif index == 6: # 道具投出
             self.weapon_name_label.setText("道具名称:")
             self.weapon_name_label.show()
             self.weapon_name_input.show()
             self.weapon_name_input.setEnabled(True)
             
             # 切换为道具列表
+            current_text = self.weapon_name_input.currentText()
             self.weapon_name_input.clear()
             self.weapon_name_input.addItems(self.grenade_names_cn)
+            if current_text in self.grenade_names_cn:
+                self.weapon_name_input.setCurrentText(current_text)
             
             from PySide6.QtCore import QStringListModel
             model = QStringListModel(self.grenade_names_cn)
@@ -360,31 +352,16 @@ class AddEventDialog(MessageBoxBase):
         event_index = self.event_type_combo.currentIndex()
         
         # 使用索引映射，与components.py保持一致
-        event_mapping = {
-            1: "kill",           # 全局击杀
-            2: "bomb_planted",   # C4安装
-            3: "bomb_defused",   # C4拆除
-            4: "player_death",   # 玩家死亡
-            6: "active",         # 切换到
-            7: "reloading",      # 换弹
-            8: "weapon_kill",    # 使用武器击杀
-            9: "grenade_thrown"  # 道具投出
-        }
+        event_mapping = REALTIME_EVENT_MAPPING
         event_type = event_mapping.get(event_index, "active")
         
         # 为全局事件设置正确的武器名称
-        if event_index in [1, 2, 3, 4]:  # 全局事件
+        if event_index == 1:  # 全局事件
             weapon_name = "全局事件"
         
         # 为事件生成名称
         if event_index == 1:
             name = "全局击杀音效"
-        elif event_index == 2:
-            name = "C4安装音效"
-        elif event_index == 3:
-            name = "C4拆除音效"
-        elif event_index == 4:
-            name = "玩家死亡音效"
         else:
             name = f"{weapon_name}_{event_type}"
         
@@ -410,31 +387,12 @@ class AddEventDialog(MessageBoxBase):
         return config
     
     def set_config(self, config):
+        if config.get('event') in RETIRED_REALTIME_EVENTS:
+            raise ValueError('该实时音效事件已移除')
         # 设置配置信息
-        weapon_name = config.get("weapon", "")
-        if weapon_name:
-            # 将英文武器名称转换为中文显示
-            weapon_name_cn = self.weapon_en_to_cn.get(weapon_name, weapon_name)
-            # 查找是否在下拉列表中存在该武器名称
-            index = self.weapon_name_input.findText(weapon_name_cn)
-            if index >= 0:
-                self.weapon_name_input.setCurrentIndex(index)
-            else:
-                # 如果不存在，设置为可编辑文本
-                self.weapon_name_input.setCurrentText(weapon_name_cn)
-        
         event_type = config.get("event", "active")
-        event_index_mapping = {
-            "kill": 1,           # 全局击杀
-            "bomb_planted": 2,   # C4安装
-            "bomb_defused": 3,   # C4拆除
-            "player_death": 4,   # 玩家死亡
-            "active": 6,         # 切换到
-            "reloading": 7,      # 换弹
-            "weapon_kill": 8,    # 使用武器击杀
-            "grenade_thrown": 9  # 道具投出
-        }
-        event_index = event_index_mapping.get(event_type, 6)
+        event_index_mapping = {event: index for index, event in REALTIME_EVENT_MAPPING.items()}
+        event_index = event_index_mapping.get(event_type, 3)
         self.event_type_combo.setCurrentIndex(event_index)
         
         # 设置音量
@@ -449,6 +407,15 @@ class AddEventDialog(MessageBoxBase):
         
         # 更新UI状态
         self._update_ui_state_for_event_type(event_index)
+        # 先按事件切换武器/道具列表，再恢复选择，避免编辑时变成“所有道具”。
+        weapon_name = config.get("weapon", "")
+        if weapon_name:
+            weapon_name_cn = self.weapon_en_to_cn.get(weapon_name, weapon_name)
+            index = self.weapon_name_input.findText(weapon_name_cn)
+            if index >= 0:
+                self.weapon_name_input.setCurrentIndex(index)
+            else:
+                self.weapon_name_input.setCurrentText(weapon_name_cn)
         
         # 设置连杀配置
         is_advanced = config.get("is_advanced", False)

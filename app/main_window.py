@@ -1,6 +1,7 @@
 import os
 import json
 import threading
+import time
 from PySide6.QtWidgets import QApplication, QFileDialog, QListWidgetItem
 from PySide6.QtCore import Qt, QTimer, Signal, QObject
 from PySide6.QtGui import QImage, QIcon, QDesktopServices
@@ -16,6 +17,9 @@ from app.logic.steam_utils import SteamUtils, PathValidator
 from app.logic.sound_replacer import SoundReplacer
 from app.logic.gsi_manager import GSIManager
 from app.logic.visual_handler import VisualHandler
+from app.logic.music_box_controller import MusicBoxController
+from app.logic.flash_diagnostics import record
+from app.logic.browser_media_bridge import BrowserMediaBridge
 from app.logic.go_pet_manager import GoPetManager
 from app.logic.launch_manager import LaunchManager
 from app.release_endpoints import UPDATE_URL
@@ -38,11 +42,15 @@ class UpdateSignalEmitter(QObject):
 class CS2Tool(FluentWindow):
     def __init__(self):
         super().__init__()
-        self.version = "1.5.0"
+        self.version = "1.5.4.bate"
+        self._last_received_flash = None
         self.repo_url = "https://github.com/clover-233/CS2Toolkit"
         self.is_dark_mode = False
         self._force_quit = False
         self.config_manager = ConfigManager()
+        self.browser_bridge = BrowserMediaBridge(self.config_manager, self)
+        self.config_manager.browser_bridge = self.browser_bridge
+        QApplication.instance().aboutToQuit.connect(self.browser_bridge.close)
 
         # 1. 设定主题与品牌色
         setThemeColor(QColor("#0078D4")) # 品牌蓝色
@@ -59,6 +67,10 @@ class CS2Tool(FluentWindow):
         self.animation_manager = AnimationManager(self)
         self.gsi_manager = GSIManager(config_manager=self.config_manager)
         self.visual_handler = VisualHandler(self.config_manager)
+        self.music_box = MusicBoxController(self.config_manager, self)
+        self.music_box.diagnostic.connect(lambda event, details: record(event, **details))
+        record('toolkit_started', version=self.version)
+        QApplication.instance().aboutToQuit.connect(self.music_box.cleanup)
         self.go_pet_manager = GoPetManager(self.config_manager)
         self.steam_path = ""
         self.video_path = ""
@@ -160,7 +172,7 @@ class CS2Tool(FluentWindow):
 
     def _deferred_startup_tasks(self):
         self.auto_detect_steam()
-        self.check_for_updates()
+        # This local repair build is checked manually from the About page.
 
         # 启动 GSI Server（路径和配置生成已转移到 _perform_steam_detection 和 browse_steam 中处理）
         self.gsi_manager.start_server()
@@ -178,7 +190,7 @@ class CS2Tool(FluentWindow):
                 self.setting_tab.gsi_port_input.setEnabled(False)
 
     def init_window(self):
-        self.setWindowTitle("CS2 工具箱")
+        self.setWindowTitle("CS2 工具箱 · 1.5.4.bate")
         self.setWindowIcon(QIcon(":/app_icon.ico"))
         self.resize(750, 780)
         self.center()
@@ -201,11 +213,32 @@ class CS2Tool(FluentWindow):
         self.tray_icon.show()
 
     def show_window(self):
+        preview = getattr(self, '_offline_preview', None)
+        if preview is not None and preview.game is not None and preview.game.isVisible():
+            preview.focus()
+            return
         self.show()
         self.activateWindow()
 
+    def show_offline_preview(self):
+        from app.startup import StartupController
+        previous = getattr(self, '_offline_preview', None)
+        if previous is not None:
+            if previous.game is not None and previous.game.isVisible():
+                previous.focus()
+                return
+            previous.stop()
+            if previous.game is not None:
+                previous.game.deleteLater()
+            previous.deleteLater()
+        self._offline_preview = StartupController(lambda: self, parent=self)
+        self._offline_preview.start(preview=True)
+
     def quit_app(self):
         self._force_quit = True
+        if getattr(self, '_offline_preview', None) is not None:
+            self._offline_preview.stop()
+        self.music_box.cleanup()
         self.visual_handler.cleanup()
         QApplication.quit()
 
@@ -220,6 +253,7 @@ class CS2Tool(FluentWindow):
         from app.ui.pages.setting_page import SettingPage
         from app.ui.pages.visual_page import VisualPage
         from app.ui.pages.go_pet_page import GoPetPage
+        from app.ui.pages.music_box_page import MusicBoxPage
 
         self.home_tab = HomePage(self)
         self.home_tab.setObjectName("home_tab")
@@ -244,6 +278,9 @@ class CS2Tool(FluentWindow):
         self.go_pet_tab = GoPetPage(self.config_manager, self)
         self.go_pet_tab.setObjectName("go_pet_tab")
 
+        self.music_box_tab = MusicBoxPage(self.music_box, self)
+        self.music_box_tab.setObjectName("music_box_tab")
+
         self.integrated_sound_page = IntegratedSoundPage(self.gsi_manager, self.config_manager, self)
         self.integrated_sound_page.setObjectName("integrated_sound_page")
 
@@ -255,6 +292,7 @@ class CS2Tool(FluentWindow):
 
         self.addSubInterface(self.home_tab, FIF.HOME, "主页", NavigationItemPosition.TOP)
         self.addSubInterface(self.game_enhancement_tab, FIF.GAME, "游戏增强")
+        self.addSubInterface(self.music_box_tab, FIF.MUSIC, "创意音乐盒")
         self.addSubInterface(self.go_pet_tab, FIF.HEART, "桌宠与互动")
         self.addSubInterface(self.customize_tab, FIF.BRUSH, "个性化")
         self.addSubInterface(self.setting_tab, FIF.SETTING, "设置", NavigationItemPosition.BOTTOM)
@@ -468,7 +506,9 @@ class CS2Tool(FluentWindow):
             return
 
         use_vulkan = self.config_manager.get("launch_use_vulkan", False)
-        success, message = LaunchManager.launch_cs2(cs2_path, use_vulkan=use_vulkan)
+        success, message = LaunchManager.launch_cs2(
+            cs2_path, use_vulkan=use_vulkan,
+            borderless=self.config_manager.get('launch_borderless', True))
         if success:
             self.show_success("启动成功", message)
         else:
@@ -527,6 +567,11 @@ class CS2Tool(FluentWindow):
                 data_str = data_bytes.decode('utf-8', errors='ignore')
 
             game_state = json.loads(data_str)
+            game_state['_toolkit_received_at'] = time.monotonic()
+            flash = game_state.get('player', {}).get('state', {}).get('flashed')
+            if flash != self._last_received_flash:
+                record('gsi_flash_received', flashed=flash)
+                self._last_received_flash = flash
             self.gsi_signal_emitter.data_received.emit(game_state)
         except (json.JSONDecodeError, Exception):
             pass # Ignore malformed data
@@ -550,7 +595,7 @@ class CS2Tool(FluentWindow):
             old_port = game_state.get("old_port")
             new_port = game_state.get("new_port")
             self.config_manager.set("gsi_port", new_port)
-            self.show_warning("GSI端口被占用", f"原端口 {old_port} 被占用，已自动切换至 {new_port}。\n请前往【设置-高级】点击「重新生成GSI配置」并重启游戏，否则音效将失效！", duration=10000)
+            self.show_warning("GSI端口被占用", f"原端口 {old_port} 被占用，已自动切换至 {new_port}。\n服务启动后会自动更新配置；若 CS2 已在运行，请重启游戏。", duration=10000)
             if hasattr(self, 'setting_tab') and hasattr(self.setting_tab, 'gsi_port_input'):
                 self.setting_tab.gsi_port_input.setText(str(new_port))
             return
@@ -561,6 +606,13 @@ class CS2Tool(FluentWindow):
             host = game_state.get("host", "127.0.0.1")
             if isinstance(port, int):
                 self.config_manager.set("gsi_port", port)
+            # The listener may have switched ports after the initial path check.
+            # Always write the port that was actually bound, rather than leaving
+            # CS2 posting to the old listener.
+            if self.gsi_manager.cs2_path:
+                cfg_ok, cfg_message = self.gsi_manager.create_gsi_cfg()
+                if not cfg_ok:
+                    self.show_warning("GSI配置未更新", cfg_message, duration=10000)
             if hasattr(self, 'home_tab'):
                 self.home_tab.status_gsi_server.setText(f"服务运行中...")
                 self.home_tab.status_gsi_server.setStyleSheet("color: green;")
@@ -604,8 +656,10 @@ class CS2Tool(FluentWindow):
                 self.home_tab.status_gsi_server.setStyleSheet("color: green;")
                 self.home_tab.update_gsi_overview()
             # This is where the event matching logic will go
-            self.integrated_sound_page.process_game_state(game_state)
+            # Display time-sensitive visuals before audio/event bookkeeping.
             self.visual_handler.process_gsi(game_state)
+            self.music_box.process_gsi(game_state)
+            self.integrated_sound_page.process_game_state(game_state)
             self.go_pet_manager.process_gsi(game_state)
 
 
